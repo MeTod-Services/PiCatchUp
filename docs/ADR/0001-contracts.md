@@ -160,5 +160,5 @@ The project owner approved the decisions above during the T-S01 session. The tas
 formal acceptance criterion still requires both implementation-lane contributors to
 acknowledge the freeze:
 
-- [ ] Contributor A — name/date
+- [ ] Contributor A — Col B Daivs (Tod.) / 05-08-2026
 - [ ] Contributor B — name/date
