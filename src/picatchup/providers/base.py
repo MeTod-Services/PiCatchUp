@@ -1,91 +1,49 @@
-"""Frozen external-provider boundaries for PiCatchUp (T-S01).
+"""The boundary with the outside world.
 
-Only modules under :mod:`picatchup.providers` may import external provider SDKs.
-Application code depends on these synchronous protocols and provider-neutral domain
-records. Changes to this file require the joint review described in PLAN.md §11.5.
+Only modules under `picatchup.providers` may import Groq, HTTP or Telegram.
+Everything else takes one of these three objects as a parameter and calls it,
+which is what lets the pipeline run without network access.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from pathlib import Path
-from typing import BinaryIO, Protocol
+from typing import Protocol
 
 from picatchup.domain.provider_types import (
     GenerationResult,
-    Keyboard,
-    RetrievedChunk,
-    SentMessage,
     TranscriptionResult,
     Update,
 )
 
 
-class TranscriptionProvider(Protocol):
-    name: str
+class Transcriber(Protocol):
+    """Audio to timed text. Implemented by providers/groq_audio.py."""
+
     model: str
 
     def transcribe(
-        self,
-        audio_path: Path,
-        *,
-        language: str = "it",
-        prompt: str | None = None,
-        timeout_s: float = 120.0,
+        self, audio_path: Path, *, language: str = "it"
     ) -> TranscriptionResult: ...
 
 
-class TextGenerationProvider(Protocol):
-    name: str
+class TextGenerator(Protocol):
+    """Prompt to text. Implemented by providers/groq_text.py."""
+
     model: str
 
     def generate(
-        self,
-        *,
-        system: str,
-        user: str,
-        max_tokens: int,
-        temperature: float = 0.2,
-        stop: Sequence[str] | None = None,
-        timeout_s: float = 60.0,
+        self, *, system: str, user: str, max_tokens: int
     ) -> GenerationResult: ...
 
 
-class MessagingProvider(Protocol):
-    def send_message(
-        self,
-        chat_id: int,
-        text: str,
-        *,
-        reply_to_message_id: int | None = None,
-        keyboard: Keyboard | None = None,
-        idempotency_key: str,
-    ) -> SentMessage: ...
+class Messenger(Protocol):
+    """Telegram. Implemented by providers/telegram.py."""
 
     def get_updates(self, offset: int, timeout_s: int) -> list[Update]: ...
 
-    def answer_callback_query(self, callback_query_id: str) -> None: ...
+    def send_message(self, chat_id: int, text: str) -> int:
+        """Returns the Telegram message id."""
+        ...
 
     def leave_chat(self, chat_id: int) -> None: ...
-
-
-class Retriever(Protocol):
-    def search(
-        self,
-        *,
-        class_id: str,
-        query: str,
-        lesson_date: str | None,
-        subject: str | None,
-        limit: int,
-    ) -> list[RetrievedChunk]: ...
-
-
-class BlobStore(Protocol):
-    def put(self, src: Path, key: str) -> str: ...
-
-    def open(self, key: str) -> BinaryIO: ...
-
-    def delete(self, key: str) -> None: ...
-
-    def exists(self, key: str) -> bool: ...

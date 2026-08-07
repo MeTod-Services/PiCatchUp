@@ -1,186 +1,133 @@
-# PiCatchUp architecture
+# Architecture
 
-> Contract baseline: T-S01 / ADR-0001. This document describes boundaries, not an
-> implemented system. `PLAN.md` remains the product and delivery plan.
+The point of this page is that you can hold the whole system in your head. If
+you ever cannot, the system has grown wrong.
 
-## 1. System shape
+The long version of this document, describing a much bigger system, is archived
+in `docs/archive/ARCHITECTURE-v1.md`.
 
-PiCatchUp is a modular Python monolith deployed as two long-running processes:
+---
 
-- `picatchup-worker`: leases durable SQLite jobs and runs pipeline handlers;
-- `picatchup-bot`: long-polls Telegram and delegates application work.
+## Four pieces
 
-Timers and the admin CLI enqueue work. SQLite is the canonical store and runs with
-WAL, foreign keys enabled, and a busy timeout. Audio and generated Markdown live
-under `DATA_DIR`; Markdown and the FTS index are rebuildable artifacts.
+Every part of PiCatchUp belongs to exactly one of these.
 
-There is no internal network API, Redis, container runtime, or web frontend.
+**1. The warehouse — `db.py` + `schema.sql`**
+One SQLite file. It holds lessons, chunks, recaps, users, deliveries. Nothing
+else in the program keeps state; if it is not in the database, it did not
+happen.
 
-## 2. Dependency direction
+**2. The outside world — `providers/`**
+Groq and Telegram. This is the only place allowed to make a network call, and
+the only place allowed to `import groq` or touch HTTP. Every function here takes
+ordinary values in and gives ordinary values back.
 
-```text
-CLI / Telegram / job handlers
-            |
-            v
-application modules (ingest, transcription, normalize, segmentation,
-                     recap, retrieval, QA, export)
-            |
-            +--> domain records and enums
-            +--> repository interfaces / SQLite repositories
-            +--> provider Protocols
-                         |
-                         v
-              providers/* implementations
-              (Groq, Telegram, local FS, fakes)
+**3. The assembly line — `transcribe.py`, `recap.py`, `search.py`, `qa.py`**
+The actual work. Each module takes something from the warehouse, does one
+transformation to it (possibly asking the outside world for help), and puts the
+result back. These modules know nothing about Groq or Telegram — they are handed
+a provider and call it.
+
+**4. The face — `cli.py`, `bot.py`, `daily.py`**
+How a human or a clock starts the work. The CLI is for you; the bot is for your
+classmates; `daily.py` is for cron. None of these three contain real logic:
+they parse an input, call the assembly line, print or send the result.
+
+---
+
+## The picture
+
+```
+      you                 classmates              cron, 15:00
+       |                       |                       |
+    cli.py                  bot.py                 daily.py          THE FACE
+       |                       |                       |
+       +-----------+-----------+-----------+-----------+
+                               |
+    transcribe.py     recap.py     search.py     qa.py           ASSEMBLY LINE
+                               |
+              +----------------+----------------+
+              |                                 |
+           db.py                          providers/            WAREHOUSE +
+      data/picatchup.db              groq_audio, groq_text,     OUTSIDE WORLD
+                                          telegram
 ```
 
-Rules:
+Arrows only ever point downward. The face calls the assembly line; the assembly
+line calls the warehouse and the providers. Nothing calls back upward — `db.py`
+never imports `bot.py`, `groq_text.py` never imports `recap.py`.
 
-1. `picatchup.domain` contains immutable data declarations and enums, no I/O or
-   business logic.
-2. `picatchup.providers.base` is the external-service boundary. Only
-   `picatchup.providers` implementations may import Groq, HTTP, or Telegram SDKs.
-3. Application modules receive providers by dependency injection; offline tests use
-   deterministic fakes.
-4. Repositories enforce class scoping. A shared-data read always receives a
-   server-resolved `class_id`.
-5. No LLM output may become a path, SQL fragment, authorization decision, citation,
-   chat id, or job-success signal.
+That single rule is what keeps the project understandable as it grows. When you
+add a file, ask which of the four layers it belongs to. If the answer is "two of
+them", it should be two files.
 
-## 3. Daily data flow
+---
 
-```text
-one audio file per lesson
-  -> ingest/checksum/ffmpeg normalization
-  -> transcription with absolute timed segments
-  -> deterministic text normalization and quality scoring
-  -> subject classification (LLM; timetable is a hint)
-  -> lesson row and transcript-to-lesson assignment
-  -> deterministic lesson-aligned chunks and FTS5 index
-  -> one recap per class/day
-  -> one delivery job per authorized user
-  -> class-scoped retrieval and grounded Q&A
+## Why providers are separated
+
+`recap.py` does not call Groq directly. It receives something with a `generate`
+method and calls that. This costs one extra parameter and buys three things:
+
+- you can run and test the pipeline without spending API credits
+- when Groq changes its SDK, one file changes
+- when you want a different model provider, you write one new file and nothing
+  else moves
+
+That is the whole reason. Not purity — those three things.
+
+---
+
+## The daily data flow
+
+```
+audio file in data/inbox/
+   -> sha256 checksum   (have we seen this file before?)
+   -> ffmpeg: cut into ~10 minute pieces if it is large
+   -> Groq Whisper: each piece to text with timings
+   -> reassemble into one timeline, save as a lessons row
+   -> cut the text into ~700 character chunks, save + index in FTS5
+   -> Groq text model: all of today's lessons to one recap
+   -> Telegram: one message per active user, one deliveries row each
 ```
 
-### Lesson classification decision
+And, separately, whenever a student sends a message:
 
-A recording never contains multiple lessons: **one recording is one lesson**. This
-removes boundary detection from segmentation. The classifier identifies the subject
-from transcript content, constrained to configured class subjects, while the
-schedule supplies the likely period and subject as hints.
+```
+question
+   -> FTS5 search over that class's chunks -> best 5
+   -> prompt = question + those 5 chunks only
+   -> Groq text model
+   -> answer, split into "from the lesson" and "extra explanation"
+   -> send
+```
 
-A low-confidence result or a disagreement with the timetable is persisted with
-`needs_review=1`. A manual classification is authoritative and is never overwritten
-by a model. Threshold values and the timetable format remain configuration work for
-T-A07; the behavior above is frozen by ADR-0001.
+The model never sees a whole transcript and never sees the database. It sees a
+question and five paragraphs.
 
-The transcript is untrusted input. Classification output is constrained to a known
-subject plus confidence; it cannot create arbitrary paths, SQL, or permissions.
+---
 
-## 4. Persistence boundaries
+## Ideas worth knowing
 
-### Shared once per class
+Short definitions of things that come up in the plan.
 
-`lessons`, `audio_assets`, `transcripts`, `transcript_segments`,
-`transcript_chunks`, `chunk_fts`, `lesson_notes`, `recaps`, and `recap_sections`.
-These rows never carry a student `user_id`.
+**Checksum (sha256)** — a long number computed from a file's contents. Same
+contents, same number. We use it to notice we already transcribed a file.
 
-### Personal per user
+**Idempotent** — running it twice does the same thing as running it once. The
+whole reason `daily.py` can be safely re-run after a crash. We get it mostly for
+free from the `UNIQUE` constraints in the schema rather than from clever code.
 
-`users`, `telegram_chats`, `conversation_state`, `user_preferences`, `deliveries`,
-`questions`, `answers`, and `telegram_updates`. Personal rows reference shared data
-by id; transcript and recap text are never copied per user.
+**FTS5** — SQLite's built-in full-text search. It ranks paragraphs by how well
+they match your search words. No extra software to install, no vector database.
 
-### Operational
+**Long polling** — how the bot receives messages. It asks Telegram "anything
+new?", Telegram holds the connection open until there is something or ~30
+seconds pass, then it asks again. Nothing needs to reach your machine from the
+internet, so there is no server to expose.
 
-`jobs`, `audit_log`, and `schema_migrations`.
+**Grounding** — giving the model the real source text and telling it to answer
+only from that. It is what makes an answer checkable instead of plausible.
 
-Access to a shared row requires an active user, a live `class_members` membership,
-and equality between the membership class and the row's explicit `class_id`.
-Caller-supplied ids are validated inside that scope. Scope mismatches behave as
-"not found".
-
-## 5. Schema freeze and migration ownership
-
-The logical schema is `PLAN.md` §5 with these frozen clarifications:
-
-- `0001_init.sql` owns §5.1–§5.3 plus `jobs`, `audit_log`, and
-  `schema_migrations`.
-- `0050_telegram.sql` owns `telegram_chats`, `conversation_state`,
-  `user_preferences`, `telegram_updates`, `questions`, `answers`, and
-  `answer_citations`.
-- Foreign keys from retained personal/derived records to deletable shared records
-  use `ON DELETE SET NULL` where the record remains meaningful. Lesson-owned notes
-  use `ON DELETE CASCADE`; `lesson_notes.author_user_id` uses
-  `ON DELETE SET NULL`. Explicit data-deletion services still remove dependent
-  transcript/recap artifacts transactionally.
-- SQLite integers representing booleans are exposed as `bool` in domain records.
-- Database JSON text is exposed as `Mapping[str, object]`.
-- UTC timestamps cross domain/job boundaries as ISO-8601 strings; school dates use
-  `YYYY-MM-DD` in the class timezone.
-- `recaps.body_telegram` stores the complete Telegram-safe rendering. Delivery may
-  deterministically split it at block boundaries; split messages are derived and
-  are not additional recap rows.
-
-Migration SQL must add the FTS5 external-content triggers and the constraints and
-indexes listed in `PLAN.md` §5. Applied migrations are append-only.
-
-## 6. Provider contracts
-
-`src/picatchup/providers/base.py` freezes five synchronous Protocols:
-
-- `TranscriptionProvider`
-- `TextGenerationProvider`
-- `MessagingProvider`
-- `Retriever`
-- `BlobStore`
-
-Provider SDK objects are converted immediately to records from
-`picatchup.domain.provider_types`. Telegram callback acknowledgement and leaving a
-group chat are explicit messaging operations because both are required by the bot
-flows. Every network implementation applies bounded timeouts and retry policy; the
-Protocols themselves do not implement retries.
-
-Changes to `providers/base.py` require a joint contract PR and review by both lanes.
-
-## 7. Persistent jobs
-
-Every queue row has a typed payload from `picatchup.domain.jobs`. Payload JSON uses
-exact dataclass field names, rejects unknown/missing fields, and always repeats
-`class_id` for class-scoped work. The queue must verify that envelope and payload
-class ids match.
-
-| Job type | Payload | Idempotency key |
-| --- | --- | --- |
-| `ingest` | `IngestAudioPayload` | `ingest:{class_id}:{sha256}` after discovery/checksum |
-| `transcribe` | `TranscribeAudioPayload` | `transcribe:{audio_asset_id}:{model}` |
-| `normalize` | `NormalizeTranscriptPayload` | `normalize:{transcript_id}` |
-| `segment` | `SegmentLessonPayload` | `segment:{transcript_id}` |
-| `index` | `IndexTranscriptPayload` | `index:{transcript_id}` |
-| `recap` | `GenerateRecapPayload` | `recap:{class_id}:{recap_date}:{input_hash}` |
-| `deliver` | `DeliverRecapPayload` | `deliver:{recap_id}:{user_id}` |
-| `export` | `ExportRecapPayload` | `export:{class_id}:{recap_id}:{recap_version}` |
-| `purge` | `PurgeAudioPayload` | `purge:{class_id}:{UTC-date}` |
-| `backup` | `BackupDatabasePayload` | `backup:{snapshot_date}` |
-
-Inbox discovery occurs before enqueueing a per-file `ingest` job so its checksum can
-form the idempotency key. Delivery fan-out similarly creates one job per
-`(recap_id, user_id)`; one fan-out job must not perform N opaque sends.
-
-Handlers are idempotent independently of queue keys through schema uniqueness and
-transactions. Leases allow crash recovery; retryable and fatal exceptions are
-classified by application error types, not provider response prose.
-
-## 8. Security and content handling
-
-- Secrets exist only in `.env`/systemd environment files and are represented by
-  redacted configuration values.
-- Lesson, recap, question, and answer bodies are not logged at INFO or above.
-- All runtime paths derive from `DATA_DIR`; original filenames are metadata only.
-- The bot rejects non-private chats before normal command handling and checks
-  allowlist/admin status on every update.
-- Retrieval and citations are deterministic and class-scoped. The LLM receives only
-  bounded retrieved chunks, never a full transcript or direct data access.
-- Provider output is untrusted, structurally validated, escaped, and length-capped.
-
-See `PLAN.md` §6–§8 for the complete privacy, Q&A, and recovery requirements.
+**Prompt injection** — a transcript could contain someone saying "ignore your
+instructions". We never let model output become a file path, a database query,
+or a permission decision, so the worst case stays "a weird paragraph".
