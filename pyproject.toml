@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "picatchup"
+dynamic = ["version"]
+description = "Catch up on the lessons you missed"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["mypy>=1.11", "pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+picatchup = "picatchup.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "picatchup.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["picatchup*"]
+
+# schema.sql travels with the installed package, so `picatchup init` works
+# from anywhere, not just from inside the project folder.
+[tool.setuptools.package-data]
+picatchup = ["schema.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+# The old plan is kept as a historical record; do not reformat its examples.
+extend-exclude = ["docs/archive"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["picatchup"]
+mypy_path = "src"

@@ -22,9 +22,7 @@ class Transcriber(Protocol):
 
     model: str
 
-    def transcribe(
-        self, audio_path: Path, *, language: str = "it"
-    ) -> TranscriptionResult: ...
+    def transcribe(self, audio_path: Path, *, language: str = "it") -> TranscriptionResult: ...
 
 
 class TextGenerator(Protocol):
@@ -32,9 +30,7 @@ class TextGenerator(Protocol):
 
     model: str
 
-    def generate(
-        self, *, system: str, user: str, max_tokens: int
-    ) -> GenerationResult: ...
+    def generate(self, *, system: str, user: str, max_tokens: int) -> GenerationResult: ...
 
 
 class Messenger(Protocol):
