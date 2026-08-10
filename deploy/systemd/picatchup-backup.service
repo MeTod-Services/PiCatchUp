@@ -1,0 +1,17 @@
+[Unit]
+Description=PiCatchUp safe SQLite backup
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=picatchup
+Group=picatchup
+WorkingDirectory=/var/lib/picatchup
+EnvironmentFile=/etc/picatchup/picatchup.env
+ExecStart=/opt/picatchup/venv/bin/picatchup backup
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/picatchup

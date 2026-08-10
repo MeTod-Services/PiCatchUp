@@ -48,6 +48,9 @@ class TestReadName:
     def test_a_name_that_says_nothing_says_nothing(self) -> None:
         assert transcribe.read_name(Path("registrazione finale (2).mp3")) == (None, None)
 
+    def test_an_impossible_filename_date_is_not_accepted(self) -> None:
+        assert transcribe.read_name(Path("2026-99-40 Matematica.mp3")) == (None, None)
+
 
 class TestBuildChunks:
     def test_groups_segments_up_to_the_size(self) -> None:
@@ -173,8 +176,16 @@ class TestTranscribeFile:
             text=spoken[piece.name], segments=(segment(0, 5_000, spoken[piece.name]),)
         )
 
-        lesson = transcribe.transcribe_file(conn, settings, source, transcriber=transcriber)
+        progress: list[tuple[int, int]] = []
+        lesson = transcribe.transcribe_file(
+            conn,
+            settings,
+            source,
+            transcriber=transcriber,
+            progress=lambda n, total: progress.append((n, total)),
+        )
 
+        assert progress == [(1, 2), (2, 2)]
         assert lesson.text == "prima parte seconda parte"
         [chunk] = conn.execute(
             "SELECT text, start_ms, end_ms FROM chunks WHERE lesson_id = ?", (lesson.id,)

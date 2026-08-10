@@ -13,12 +13,14 @@ def new_id() -> str:
 
 
 def utc_now() -> str:
-    """The current time as UTC ISO-8601 text, e.g. '2026-09-15T13:45:02+00:00'.
+    """The current time as UTC ISO-8601 text with microsecond ordering.
 
     Everything stored in the database uses this, so timestamps are comparable
     and sortable as plain strings.
     """
-    return datetime.now(UTC).isoformat(timespec="seconds")
+    # Microseconds preserve ordering when a lesson and recap are created during
+    # the same second, which lets recap freshness checks detect late lessons.
+    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 def today(timezone: str) -> str:

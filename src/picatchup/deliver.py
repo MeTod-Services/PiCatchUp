@@ -1,8 +1,9 @@
 """Getting the recap onto people's phones.
 
-The rule that matters: nobody receives the same recap twice. It is enforced by
-the `deliveries` table, not by anything clever here — we write a row for every
-message that actually arrived, and we skip whoever already has one.
+The rule that matters: ordinary retries avoid duplicate recaps. We record each
+Telegram-accepted send and skip it later. A process crash after Telegram accepts
+a message but before SQLite commits can still cause a duplicate on retry; this
+MVP deliberately does not claim distributed exactly-once delivery.
 """
 
 from __future__ import annotations
@@ -64,10 +65,11 @@ def send_recap(
         except ProviderError as error:
             # One blocked bot must not stop the rest of the class from reading
             # the recap, so we note it and carry on.
-            log.warning("could not write to %s: %s", person["display_name"], error)
+            log.warning("delivery_failure user_id=%s error=%s", person["id"], error)
             result.failed.append(person["display_name"])
             continue
         _record(conn, recap["id"], person["id"], message_ids)
+        log.info("delivery_success recap=%s user_id=%s", recap["id"], person["id"])
         result.sent_to.append(person["display_name"])
 
     return result
@@ -90,7 +92,7 @@ def _already_sent(conn: sqlite3.Connection, recap_id: str, user_id: str) -> bool
 
 
 def _record(conn: sqlite3.Connection, recap_id: str, user_id: str, message_ids: list[int]) -> None:
-    """Written only after the message arrived: a row here means it was read."""
+    """Record Telegram acceptance; this does not prove the student read it."""
     with conn:
         conn.execute(
             "INSERT INTO deliveries (recap_id, user_id, telegram_message_id, sent_at)"

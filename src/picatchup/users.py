@@ -26,10 +26,10 @@ def add(
 
 
 def remove(conn: sqlite3.Connection, telegram_user_id: int) -> bool:
-    """Delete someone, and with them the record of what they were sent.
+    """Delete the local allowlist entry and its local delivery records.
 
-    Deleting rather than deactivating, because "I want to be removed" means
-    removed. Returns False if there was nobody with that id.
+    This cannot remove messages already held by Telegram or a user's phone.
+    Returns False if there was nobody with that id.
     """
     with conn:
         cursor = conn.execute("DELETE FROM users WHERE telegram_user_id = ?", (telegram_user_id,))

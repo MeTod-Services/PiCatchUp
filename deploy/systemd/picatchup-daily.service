@@ -1,0 +1,19 @@
+[Unit]
+Description=PiCatchUp daily transcription, recap and delivery
+Wants=network-online.target
+After=network-online.target local-fs.target
+
+[Service]
+Type=oneshot
+User=picatchup
+Group=picatchup
+WorkingDirectory=/var/lib/picatchup
+EnvironmentFile=/etc/picatchup/picatchup.env
+ExecStart=/opt/picatchup/venv/bin/picatchup daily
+TimeoutStartSec=3h
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/picatchup

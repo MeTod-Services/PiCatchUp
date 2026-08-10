@@ -46,16 +46,24 @@ def make_recap(
 ) -> Recap:
     """Write (or rewrite) the summary of one school day and store it."""
     existing = conn.execute(
-        "SELECT id, recap_date, text, model FROM recaps WHERE recap_date = ?", (recap_date,)
+        "SELECT id, recap_date, text, model, created_at FROM recaps WHERE recap_date = ?",
+        (recap_date,),
     ).fetchone()
     if existing is not None and not force:
-        return Recap(
-            id=existing["id"],
-            recap_date=existing["recap_date"],
-            text=existing["text"],
-            model=existing["model"],
-            reused=True,
-        )
+        changed = conn.execute(
+            "SELECT 1 FROM lessons"
+            " WHERE lesson_date = ? AND text IS NOT NULL AND text != '' AND created_at >= ?"
+            " LIMIT 1",
+            (recap_date, existing["created_at"]),
+        ).fetchone()
+        if changed is None:
+            return Recap(
+                id=existing["id"],
+                recap_date=existing["recap_date"],
+                text=existing["text"],
+                model=existing["model"],
+                reused=True,
+            )
 
     lessons = conn.execute(
         "SELECT subject, duration_ms, text FROM lessons"
@@ -71,16 +79,24 @@ def make_recap(
     prompt = build_prompt(load_template(), recap_date, lessons)
 
     log.info("writing the recap for %s from %d lesson(s)", recap_date, len(lessons))
-    text = writer(prompt)
+    text = writer(prompt).strip()
+    if not text:
+        raise PiCatchUpError("the text provider returned an empty recap")
 
     recap_id = existing["id"] if existing is not None else new_id()
     with conn:
+        if existing is not None:
+            # A delivery row proves receipt of the previous text, not this new
+            # version. Invalidate it atomically with replacement so normal send
+            # delivers the regenerated recap once.
+            conn.execute("DELETE FROM deliveries WHERE recap_id = ?", (recap_id,))
         conn.execute(
             "INSERT INTO recaps (id, recap_date, text, model, created_at) VALUES (?, ?, ?, ?, ?)"
             " ON CONFLICT (recap_date) DO UPDATE SET text = excluded.text, model = excluded.model,"
             " created_at = excluded.created_at",
             (recap_id, recap_date, text, model, utc_now()),
         )
+    log.info("recap_generated date=%s lessons=%d", recap_date, len(lessons))
     return Recap(id=recap_id, recap_date=recap_date, text=text, model=model, reused=False)
 
 

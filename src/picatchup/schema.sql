@@ -1,4 +1,4 @@
--- The whole database. Six tables, no migrations.
+-- The whole database. Six real tables plus FTS5, no migration framework.
 --
 -- Every statement is "IF NOT EXISTS", so running `picatchup init` twice is
 -- harmless. While the schema is still changing, the way to change it is to
@@ -84,3 +84,11 @@ CREATE TABLE IF NOT EXISTS deliveries (
     sent_at              TEXT    NOT NULL,
     PRIMARY KEY (recap_id, user_id)
 );
+
+
+-- Durable Telegram long-poll acknowledgement. One row for this one bot.
+CREATE TABLE IF NOT EXISTS bot_state (
+    id              INTEGER PRIMARY KEY CHECK (id = 1),
+    next_update_id  INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO bot_state (id, next_update_id) VALUES (1, 0);

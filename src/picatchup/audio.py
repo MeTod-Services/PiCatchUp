@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import shutil
 import signal
 import subprocess
+import tempfile
 from pathlib import Path
-from threading import Event
+from threading import Event, current_thread, main_thread
+from typing import Any
 
 from picatchup.errors import AudioError
 
@@ -71,6 +74,68 @@ def duration_ms(path: Path) -> int:
         raise AudioError(f"{path.name}: ffprobe could not measure its duration") from None
 
 
+def validate_audio(path: Path) -> int:
+    """Prove that ffprobe can open an audio file and that it has a duration."""
+    if not path.is_file() or path.stat().st_size == 0:
+        raise AudioError(f"{path.name}: no audio output was produced")
+    measured = duration_ms(path)
+    if measured <= 0:
+        raise AudioError(f"{path.name}: the audio has no playable duration")
+    return measured
+
+
+def alsa_capture_devices() -> list[str]:
+    """Return ALSA hardware capture ids reported by ``arecord -l``."""
+    if shutil.which("arecord") is None:
+        raise AudioError(
+            "arecord is not installed. On Raspberry Pi OS: sudo apt install alsa-utils"
+        )
+    try:
+        result = subprocess.run(
+            ["arecord", "-l"], capture_output=True, text=True, check=False, timeout=10
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise AudioError(f"could not list ALSA microphones: {error}") from None
+    if result.returncode != 0:
+        detail = " ".join((result.stderr or "").split())[:200]
+        raise AudioError(f"could not list ALSA microphones: {detail or 'arecord failed'}")
+    return [
+        f"hw:{card},{device}"
+        for card, device in re.findall(r"^card (\d+):.*device (\d+):", result.stdout, re.MULTILINE)
+    ]
+
+
+def resolve_input_device(input_format: str, device: str) -> str:
+    """Backward-compatible name for the full input preflight."""
+    return check_input_device(input_format, device)
+
+
+def check_input_device(input_format: str, device: str) -> str:
+    """Perform a non-recording preflight and return the ffmpeg device name."""
+    if input_format != "alsa":
+        return device
+    devices = alsa_capture_devices()
+    if device == "auto":
+        if not devices:
+            raise AudioError(
+                "no ALSA capture device found (check the USB microphone and: arecord -l)"
+            )
+        if len(devices) > 1:
+            choices = ", ".join(devices)
+            raise AudioError(
+                f"multiple ALSA capture devices found ({choices}); "
+                "set AUDIO_INPUT_DEVICE explicitly"
+            )
+        return f"plughw:{devices[0].removeprefix('hw:')}"
+    if device.startswith(("hw:", "plughw:")):
+        hardware_name = device.removeprefix("plug")
+        if hardware_name not in devices:
+            raise AudioError(f"ALSA capture device {device} was not found (check: arecord -l)")
+    elif not devices:
+        raise AudioError("no ALSA capture device found (check the USB microphone and: arecord -l)")
+    return device
+
+
 def record(
     destination: Path,
     *,
@@ -87,8 +152,15 @@ def record(
     killed mid-frame is a lesson you have to record again. ``stop_event`` is
     used by the Raspberry Pi button listener.
     """
+    if minutes is not None and minutes <= 0:
+        raise AudioError("recording minutes must be greater than zero")
     ensure_ffmpeg()
     destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        raise AudioError(f"refusing to overwrite existing recording: {destination.name}")
+    temporary = destination.with_name(f".{destination.name}.part")
+    temporary.unlink(missing_ok=True)
+    device = check_input_device(input_format, device)
 
     command = [
         "ffmpeg",
@@ -99,6 +171,12 @@ def record(
         "-y",
         "-f",
         input_format,
+    ]
+    if input_format == "alsa":
+        # These are input constraints; plughw performs conversion for simple
+        # USB Audio Class microphones that expose another native format.
+        command += ["-ac", CHANNELS, "-ar", SAMPLE_RATE]
+    command += [
         "-i",
         device,
         "-ac",
@@ -111,31 +189,69 @@ def record(
         bitrate,
     ]
     if minutes is not None:
-        command += ["-t", str(int(minutes * 60))]
-    command.append(str(destination))
+        command += ["-t", str(minutes * 60)]
+    command += ["-f", "mp3", str(temporary)]
 
-    log.info("recording from %s:%s to %s", input_format, device, destination.name)
+    log.info("recording_started input=%s device=%s file=%s", input_format, device, destination.name)
+    # Kept open across the child lifetime and closed on every exit path below.
+    error_log = tempfile.TemporaryFile()  # noqa: SIM115
     try:
-        process = subprocess.Popen(command, start_new_session=True)
+        process = subprocess.Popen(command, start_new_session=True, stderr=error_log)
     except OSError as error:
+        error_log.close()
+        temporary.unlink(missing_ok=True)
         raise AudioError(f"could not start ffmpeg: {error}") from None
 
-    try:
-        if stop_event is None:
-            process.wait()
-        else:
-            while process.poll() is None:
-                if stop_event.wait(timeout=0.2):
-                    _stop_recording(process)
-                    break
-    except KeyboardInterrupt:
-        _stop_recording(process)
+    terminate = Event()
+    previous_sigterm: Any = None
+    if current_thread() is main_thread():
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
 
-    if not destination.is_file() or destination.stat().st_size == 0:
+        def request_stop(signum: int, frame: object) -> None:
+            terminate.set()
+
+        signal.signal(signal.SIGTERM, request_stop)
+
+    interrupted = False
+    try:
+        while process.poll() is None:
+            requested = terminate.is_set()
+            if stop_event is not None:
+                requested = stop_event.wait(timeout=0.2) or requested
+            else:
+                requested = terminate.wait(timeout=0.2) or requested
+            if requested:
+                interrupted = _stop_recording(process)
+                break
+    except KeyboardInterrupt:
+        interrupted = _stop_recording(process)
+    except AudioError:
+        temporary.unlink(missing_ok=True)
+        error_log.close()
+        raise
+    finally:
+        if previous_sigterm is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+
+    error_log.seek(0)
+    stderr = error_log.read().decode("utf-8", errors="replace")
+    error_log.close()
+    if process.returncode != 0 and not (interrupted and process.returncode == 255):
+        temporary.unlink(missing_ok=True)
+        detail = " ".join(stderr.split())[:300]
         raise AudioError(
-            f"nothing was recorded. Check that {input_format}:{device} is the right microphone "
-            "(list them with: arecord -l)"
+            f"ffmpeg could not record from {input_format}:{device}: {detail or 'no details given'}"
         )
+    try:
+        validate_audio(temporary)
+        temporary.replace(destination)
+    except (AudioError, OSError) as error:
+        temporary.unlink(missing_ok=True)
+        if isinstance(error, AudioError):
+            raise
+        raise AudioError(f"could not finalize {destination.name}: {error}") from None
+    log.info("recording_stopped file=%s", destination.name)
+    log.info("audio_saved file=%s bytes=%d", destination.name, destination.stat().st_size)
     return destination
 
 
@@ -143,28 +259,34 @@ def to_mp3(source: Path, destination: Path, *, bitrate: str = "48k") -> Path:
     """Convert any recording (a phone's .m4a, say) into our mp3 shape."""
     ensure_ffmpeg()
     destination.parent.mkdir(parents=True, exist_ok=True)
-    _run(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-y",
-            "-i",
-            str(source),
-            "-vn",
-            "-ac",
-            CHANNELS,
-            "-ar",
-            SAMPLE_RATE,
-            "-c:a",
-            "libmp3lame",
-            "-b:a",
-            bitrate,
-            str(destination),
-        ]
-    )
+    destination.unlink(missing_ok=True)
+    try:
+        _run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostdin",
+                "-y",
+                "-i",
+                str(source),
+                "-vn",
+                "-ac",
+                CHANNELS,
+                "-ar",
+                SAMPLE_RATE,
+                "-c:a",
+                "libmp3lame",
+                "-b:a",
+                bitrate,
+                str(destination),
+            ]
+        )
+        validate_audio(destination)
+    except AudioError:
+        destination.unlink(missing_ok=True)
+        raise
     return destination
 
 
@@ -204,17 +326,23 @@ def split(source: Path, into: Path, *, minutes: int) -> list[Path]:
     return pieces
 
 
-def _stop_recording(process: subprocess.Popen[bytes]) -> None:
-    """Ask ffmpeg to finish the current frame and close the output cleanly."""
+def _stop_recording(process: subprocess.Popen[bytes]) -> bool:
+    """Ask ffmpeg to finish and report whether SIGINT was actually sent."""
     if process.poll() is not None:
-        return
-    process.send_signal(signal.SIGINT)
+        return False
+    try:
+        process.send_signal(signal.SIGINT)
+    except ProcessLookupError:
+        return False
+    except OSError as error:
+        raise AudioError(f"could not stop ffmpeg cleanly: {error}") from None
     try:
         process.wait(timeout=30)
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait()
         raise AudioError("ffmpeg would not stop; the recording may be truncated") from None
+    return True
 
 
 def _run(command: list[str]) -> str:

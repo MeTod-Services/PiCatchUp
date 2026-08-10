@@ -84,16 +84,52 @@ class TestMakeRecap:
         assert len(calls) == 1
         assert again.reused is True and again.text == first.text
 
-    def test_force_rewrites_it_in_place(
+    def test_a_late_lesson_regenerates_and_invalidates_old_delivery_state(
+        self, conn: sqlite3.Connection, settings: Settings
+    ) -> None:
+        add_lesson(conn, date="2026-09-15", subject="Matematica", text="Prima lezione.")
+        first = recap.make_recap(conn, settings, "2026-09-15", writer=lambda p: "prima")
+        user_id = new_id()
+        conn.execute(
+            "INSERT INTO users (id, telegram_user_id, display_name, created_at)"
+            " VALUES (?, 1, 'Ada', ?)",
+            (user_id, utc_now()),
+        )
+        conn.execute(
+            "INSERT INTO deliveries (recap_id, user_id, sent_at) VALUES (?, ?, ?)",
+            (first.id, user_id, utc_now()),
+        )
+        conn.commit()
+        add_lesson(conn, date="2026-09-15", subject="Fisica", text="Lezione arrivata dopo.")
+
+        updated = recap.make_recap(conn, settings, "2026-09-15", writer=lambda p: "aggiornato")
+
+        assert not updated.reused
+        assert updated.text == "aggiornato"
+        assert conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0] == 0
+
+    def test_force_rewrites_in_place_and_invalidates_old_deliveries(
         self, conn: sqlite3.Connection, settings: Settings
     ) -> None:
         add_lesson(conn, date="2026-09-15", subject="Matematica", text="Oggi le derivate.")
         first = recap.make_recap(conn, settings, "2026-09-15", writer=lambda p: "prima versione")
+        user_id = new_id()
+        conn.execute(
+            "INSERT INTO users (id, telegram_user_id, display_name, created_at)"
+            " VALUES (?, 1, 'Ada', ?)",
+            (user_id, utc_now()),
+        )
+        conn.execute(
+            "INSERT INTO deliveries (recap_id, user_id, sent_at) VALUES (?, ?, ?)",
+            (first.id, user_id, utc_now()),
+        )
+        conn.commit()
 
         second = recap.make_recap(
             conn, settings, "2026-09-15", writer=lambda p: "seconda versione", force=True
         )
 
         assert second.text == "seconda versione"
-        assert second.id == first.id, "the same recap, so deliveries still point at it"
+        assert second.id == first.id
         assert conn.execute("SELECT COUNT(*) FROM recaps").fetchone()[0] == 1
+        assert conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0] == 0

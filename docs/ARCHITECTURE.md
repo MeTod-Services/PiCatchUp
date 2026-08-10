@@ -1,139 +1,140 @@
 # Architecture
 
-The point of this page is that you can hold the whole system in your head. If
-you ever cannot, the system has grown wrong.
+PiCatchUp is a small modular monolith for one class on one Raspberry Pi. It has
+one Python package, one SQLite database, ordinary local files, and a few systemd
+processes. There is no internal network API, queue service, ORM, or web UI.
 
-The long version of this document, describing a much bigger system, is archived
-in `docs/archive/ARCHITECTURE-v1.md`.
+## Boundaries
 
----
+### 1. Persistent state — `db.py` and `schema.sql`
 
-## Four pieces
+`data/picatchup.db` is the single source of truth for lessons, timed chunks,
+recaps, authorized users, delivery records and the Telegram polling offset.
+Connections enable WAL, foreign
+keys and a busy timeout so the bot can read while the daily command writes.
+Schema uniqueness makes ingestion, recap creation and ordinary delivery retries
+idempotent.
 
-Every part of PiCatchUp belongs to exactly one of these.
+The only non-database state is `device-status.json`: a tiny atomic, ephemeral
+snapshot used for communication between short-lived pipeline commands and the
+OLED process. It contains display state/progress only, never lesson text, and
+may be deleted at any time.
 
-**1. The warehouse — `db.py` + `schema.sql`**
-One SQLite file. It holds lessons, chunks, recaps, users, deliveries. Nothing
-else in the program keeps state; if it is not in the database, it did not
-happen.
+### 2. Internet boundary — `providers/`
 
-**2. The outside world — `providers/`**
-Groq and Telegram. This is the only place allowed to make a network call, and
-the only place allowed to `import groq` or touch HTTP. Every function here takes
-ordinary values in and gives ordinary values back.
+Only modules under `picatchup.providers` open network connections:
 
-**3. The assembly line — `transcribe.py`, `recap.py`, `deliver.py`, `search.py`, `qa.py`**
-The actual work. Each module takes something from the warehouse, does one
-transformation to it (possibly asking the outside world for help), and puts the
-result back. These modules know nothing about Groq or Telegram — they are handed
-a provider and call it.
+- `groq_audio.py` uploads one bounded audio piece and returns timed text;
+- `groq_text.py` sends a prompt and returns prose;
+- `telegram.py` long-polls, sends/splits messages, and leaves group chats;
+- `_http.py` supplies bounded timeouts, retries and safe errors.
 
-Two smaller files sit alongside them: `users.py` (who is allowed to receive
-anything) and `audio.py`, the only place that knows an ffmpeg command line.
-`audio.py` runs a program on this machine rather than calling a server, which is
-why it is not a provider.
+Everything outside this directory receives Python strings, dataclasses, rows,
+or injected callables. Tests replace providers and use no credentials.
 
-**4. The face — `cli.py`, `buttons.py`, `bot.py`, `daily.py`**
-How a human or a clock starts the work. The CLI and the Raspberry Pi recording
-button are for you; the bot is for your classmates; `daily.py` is for cron.
-None of these contain real logic: they parse an input or a GPIO press, call the
-assembly line, print or send the result.
+### 3. Pipeline — `transcribe.py`, `recap.py`, `deliver.py`, `search.py`, `qa.py`
 
----
+- `audio.py` is the sole ffmpeg/ffprobe boundary. It records, validates,
+  converts, splits and checksums local audio.
+- `transcribe.py` preserves explicit/filename/fallback date precedence, stores
+  the audio once, stitches split-file timings, and writes chunks plus FTS5 rows
+  in one transaction.
+- `recap.py` gives the text model the selected day's transcripts. Forced
+  replacement invalidates old delivery rows because they prove receipt of old
+  text, not the regenerated text.
+- `deliver.py` sends one shared recap to active, unmuted users and records
+  Telegram acceptance.
+- `search.py` turns a question into quoted FTS5 terms and deterministically
+  joins ranked chunks to lesson metadata.
+- `qa.py` sends only the best chunks to the model. Python adds citations and
+  enforces separate `Dalla lezione` / `Spiegazione aggiuntiva` sections.
 
-## The picture
+The model writes text only. It cannot choose files/users, authorize access,
+construct SQL, execute commands, or choose citations.
 
-```
-      you                 classmates              cron, 15:00
-       |                       |                       |
-    cli.py                  bot.py                 daily.py          THE FACE
-       |                       |                       |
-       +-----------+-----------+-----------+-----------+
-                               |
-   transcribe.py  recap.py  deliver.py  search.py  qa.py         ASSEMBLY LINE
-                               |
-              +----------------+----------------+
-              |                                 |
-           db.py                          providers/            WAREHOUSE +
-      data/picatchup.db              groq_audio, groq_text,     OUTSIDE WORLD
-                                          telegram
-```
+### 4. Faces — CLI, bot, daily and device
 
-Arrows only ever point downward. The face calls the assembly line; the assembly
-line calls the warehouse and the providers. Nothing calls back upward — `db.py`
-never imports `bot.py`, `groq_text.py` never imports `recap.py`.
+- `cli.py` parses commands and reports outcomes.
+- `bot.py` long-polls provider-neutral updates, rejects groups, checks
+  `users.is_active` on every message, and routes Italian commands/Q&A.
+- `daily.py` is deliberately a for-loop: retention first, inbox ingestion,
+  recap, delivery. Files that fail remain in the inbox for the next run.
+- `device.py` owns the physical button, OLED and LED lifecycle. GPIO callbacks
+  only trigger lightweight state changes; recording runs in a worker thread.
 
-That single rule is what keeps the project understandable as it grows. When you
-add a file, ask which of the four layers it belongs to. If the answer is "two of
-them", it should be two files.
+### 5. Hardware adapters — `hardware.py`, `display.py`, `status.py`
 
----
+Raspberry-Pi imports are lazy and optional. A no-op/fake backend keeps every
+module importable and testable on normal Linux/macOS development computers.
 
-## Why providers are separated
+The explicit LED controller owns OFF, recording blink, success and error
+patterns and always drives OFF on close. The OLED renderer has only the states
+needed by a 128×64 display. It opens the configured address directly; it does
+not scan I²C during normal operation. A missing OLED/LED or battery reading is
+a degraded mode, not a reason to stop recording or Telegram.
 
-`recap.py` does not call Groq directly. It receives something with a `generate`
-method and calls that. This costs one extra parameter and buys three things:
+## Runtime picture
 
-- you can run and test the pipeline without spending API credits
-- when Groq changes its SDK, one file changes
-- when you want a different model provider, you write one new file and nothing
-  else moves
-
-That is the whole reason. Not purity — those three things.
-
----
-
-## The daily data flow
-
-```
-audio file in data/inbox/
-   -> sha256 checksum   (have we seen this file before?)
-   -> ffmpeg: cut into ~10 minute pieces if it is large
-   -> Groq Whisper: each piece to text with timings
-   -> reassemble into one timeline, save as a lessons row
-   -> cut the text into ~700 character chunks, save + index in FTS5
-   -> Groq text model: all of today's lessons to one recap
-   -> Telegram: one message per active user, one deliveries row each
+```text
+       GPIO button                 Telegram users        systemd timers
+           |                             |                    |
+       device.py                      bot.py               daily.py
+      /    |    \                       |                    |
+ audio.py OLED LED                     qa.py        transcribe/recap/deliver
+      \    |    /                       |                    |
+       status.json                 search.py (FTS5)          |
+             \                         /                     /
+              +---------------- SQLite ---------------------+
+                                   |
+                     providers/ (only internet calls)
 ```
 
-And, separately, whenever a student sends a message:
+Long-lived services are `picatchup-device` and `picatchup-bot`. Daily processing
+and backup are systemd timer-triggered one-shot commands. This keeps idle CPU and
+RAM low on a Pi Zero 2 W.
 
+## Daily flow and failure behavior
+
+```text
+retention cleanup
+  -> discover supported inbox files, oldest first
+  -> checksum (already seen means remove duplicate inbox copy)
+  -> validate/convert/split audio
+  -> Groq Whisper -> lesson + timed chunks + FTS5
+  -> Groq text -> one recap for the processing date
+  -> Telegram -> each active, unmuted user not already delivered
 ```
-question
-   -> FTS5 search over that class's chunks -> best 5
-   -> prompt = question + those 5 chunks only
-   -> Groq text model
-   -> answer, split into "from the lesson" and "extra explanation"
-   -> send
+
+Retention is first, so Groq/Telegram failures cannot extend the configured audio
+lifetime; this includes stale inbox/partial/orphan files. Transcription failures
+leave the original inbox file and block a knowingly partial recap. Default runs
+process newly unrecapped filename dates and pending delivery dates, including a
+persistent timer firing after reboot. A recap remains in SQLite when Telegram is
+unavailable. Running the command twice does not ordinarily transcribe, create or
+send duplicates.
+
+The delivery guarantee is intentionally modest: a row is written after Telegram
+accepts the complete send. A crash in that interval, or a later-part failure for
+a split recap, can duplicate already accepted text on retry. PiCatchUp does not
+claim distributed exactly-once delivery.
+
+## Search and grounded answers
+
+```text
+private Telegram question
+  -> active-user authorization
+  -> tokenize and quote safe Italian search terms
+  -> SQLite FTS5/BM25, best five chunks
+  -> model sees question + those chunks only
+  -> Python renders model sections + database-derived subject/date/minute sources
 ```
 
-The model never sees a whole transcript and never sees the database. It sees a
-question and five paragraphs.
+No result means a deterministic Italian “not found” response and no text-model
+call. Unstructured model output is discarded rather than presented as something
+the teacher said.
 
----
+## Backups
 
-## Ideas worth knowing
-
-Short definitions of things that come up in the plan.
-
-**Checksum (sha256)** — a long number computed from a file's contents. Same
-contents, same number. We use it to notice we already transcribed a file.
-
-**Idempotent** — running it twice does the same thing as running it once. The
-whole reason `daily.py` can be safely re-run after a crash. We get it mostly for
-free from the `UNIQUE` constraints in the schema rather than from clever code.
-
-**FTS5** — SQLite's built-in full-text search. It ranks paragraphs by how well
-they match your search words. No extra software to install, no vector database.
-
-**Long polling** — how the bot receives messages. It asks Telegram "anything
-new?", Telegram holds the connection open until there is something or ~30
-seconds pass, then it asks again. Nothing needs to reach your machine from the
-internet, so there is no server to expose.
-
-**Grounding** — giving the model the real source text and telling it to answer
-only from that. It is what makes an answer checkable instead of plausible.
-
-**Prompt injection** — a transcript could contain someone saying "ignore your
-instructions". We never let model output become a file path, a database query,
-or a permission decision, so the worst case stays "a weird paragraph".
+`picatchup backup` uses SQLite's online-safe mechanism, verifies the resulting
+database, and rotates timestamped files under `data/backups/`. Backups contain
+private text and need the same permissions as the live database.

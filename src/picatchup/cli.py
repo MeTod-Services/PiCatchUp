@@ -14,7 +14,21 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
-from picatchup import __version__, audio, buttons, daily, db, deliver, recap, transcribe, users
+from picatchup import (
+    __version__,
+    audio,
+    backup,
+    bot,
+    buttons,
+    daily,
+    db,
+    deliver,
+    device,
+    diagnostics,
+    recap,
+    transcribe,
+    users,
+)
 from picatchup.config import Settings, load_settings, require
 from picatchup.errors import PiCatchUpError
 from picatchup.log import setup_logging
@@ -45,13 +59,18 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("init", help="create the data folders and the database")
+    commands.add_parser("doctor", help="run offline installation and hardware diagnostics")
+    commands.add_parser("status", help="show concise local device and database status")
+    commands.add_parser("backup", help="create and rotate a safe SQLite backup")
+    commands.add_parser("bot", help="run the allowlisted Telegram long-polling bot")
 
     record = commands.add_parser("record", help="record the microphone to an mp3 in the inbox")
     record.add_argument("--subject", help="the subject, e.g. Matematica")
     record.add_argument("--minutes", type=float, help="stop by itself after this long")
     record.add_argument("--date", type=a_date, help="the school day, default today")
 
-    commands.add_parser("buttons", help="record with one Raspberry Pi GPIO button")
+    commands.add_parser("buttons", help="record with the legacy GPIO button listener")
+    commands.add_parser("device", help="run the button, OLED and recording LED controller")
 
     transcribe_cmd = commands.add_parser("transcribe", help="turn one audio file into text")
     transcribe_cmd.add_argument("file", type=Path)
@@ -77,7 +96,9 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("name")
     add.add_argument("--admin", action="store_true")
     actions.add_parser("list", help="show everyone")
-    remove = actions.add_parser("remove", help="delete someone and their delivery history")
+    remove = actions.add_parser(
+        "remove", help="delete a local allowlist entry and local delivery history"
+    )
     remove.add_argument("telegram_id", type=int)
     actions.add_parser("ids", help="show the Telegram ids of whoever wrote to the bot")
 
@@ -105,13 +126,49 @@ def cmd_init(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_doctor(settings: Settings, args: argparse.Namespace) -> int:
+    checks = diagnostics.doctor(settings)
+    print("PiCatchUp doctor\n")
+    for check in checks:
+        marker = "OK" if check.ok else "FAIL"
+        print(f"[{marker:4}] {check.name}: {check.detail}")
+    return 0 if all(check.ok for check in checks) else 1
+
+
+def cmd_status(settings: Settings, args: argparse.Namespace) -> int:
+    checks = diagnostics.status(settings)
+    print("PiCatchUp\n")
+    for check in checks:
+        marker = "OK" if check.ok else "--"
+        print(f"{check.name}: {marker} — {check.detail}")
+    database = next((check for check in checks if check.name == "database"), None)
+    return 0 if database is not None and database.ok else 1
+
+
+def cmd_backup(settings: Settings, args: argparse.Namespace) -> int:
+    path = backup.create_backup(settings)
+    print(f"backup  {path}")
+    return 0
+
+
+def cmd_bot(settings: Settings, args: argparse.Namespace) -> int:
+    with closing(db.connect(settings.db_path)) as conn:
+        db.create_tables(conn)
+        bot.run(conn, settings)
+    return 0
+
+
 def cmd_record(settings: Settings, args: argparse.Namespace) -> int:
     """Record until Ctrl-C. The file lands in the inbox, ready for `daily`."""
     lesson_date = args.date or today(settings.timezone)
-    name = f"{lesson_date}-{datetime.now().strftime('%H%M')}"
+    name = f"{lesson_date}-{datetime.now().strftime('%H%M%S')}"
     if args.subject:
         name = f"{name}-{args.subject.replace(' ', '_')}"
     destination = settings.inbox_dir / f"{name}.mp3"
+    sequence = 2
+    while destination.exists():
+        destination = settings.inbox_dir / f"{name}-{sequence}.mp3"
+        sequence += 1
 
     print(f"recording to {destination.name} — press Ctrl-C to stop")
     audio.record(
@@ -130,6 +187,11 @@ def cmd_record(settings: Settings, args: argparse.Namespace) -> int:
 def cmd_buttons(settings: Settings, args: argparse.Namespace) -> int:
     """Wait for GPIO presses until the service or the user stops us."""
     buttons.listen(settings)
+    return 0
+
+
+def cmd_device(settings: Settings, args: argparse.Namespace) -> int:
+    device.listen(settings)
     return 0
 
 
@@ -170,6 +232,8 @@ def cmd_daily(settings: Settings, args: argparse.Namespace) -> int:
         print(f"transcribed  {name}")
     for name in report.skipped:
         print(f"already had  {name}")
+    for processed_date in report.processed_dates:
+        print(f"processed    {processed_date}")
     for name, reason in report.failed:
         print(f"failed       {name}: {reason}", file=sys.stderr)
     if report.purged_audio:
@@ -204,7 +268,10 @@ def cmd_user(settings: Settings, args: argparse.Namespace) -> int:
             if not users.remove(conn, args.telegram_id):
                 print(f"there is nobody with the id {args.telegram_id}", file=sys.stderr)
                 return 1
-            print(f"{args.telegram_id} removed, with everything we had sent them")
+            print(
+                f"{args.telegram_id} removed from local access and local delivery history; "
+                "messages already on Telegram are unchanged"
+            )
             return 0
         return print_users(users.listing(conn))
 
@@ -233,8 +300,13 @@ def report_delivery(result: deliver.Delivered) -> int:
 
 HANDLERS: dict[str, Callable[[Settings, argparse.Namespace], int]] = {
     "init": cmd_init,
+    "doctor": cmd_doctor,
+    "status": cmd_status,
+    "backup": cmd_backup,
+    "bot": cmd_bot,
     "record": cmd_record,
     "buttons": cmd_buttons,
+    "device": cmd_device,
     "transcribe": cmd_transcribe,
     "recap": cmd_recap,
     "send": cmd_send,

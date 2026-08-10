@@ -1,0 +1,26 @@
+[Unit]
+Description=PiCatchUp local button, OLED and recording LED
+After=local-fs.target
+
+[Service]
+Type=simple
+User=picatchup
+Group=picatchup
+SupplementaryGroups=audio gpio i2c
+WorkingDirectory=/var/lib/picatchup
+EnvironmentFile=/etc/picatchup/picatchup.env
+ExecStart=/opt/picatchup/venv/bin/picatchup device
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=45
+# Signal Python first; it gives ffmpeg SIGINT to finalize the MP3.
+KillMode=mixed
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/picatchup
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run PiCatchUp after school Monday-Friday
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 15:00:00
+Persistent=true
+RandomizedDelaySec=30
+Unit=picatchup-daily.service
+
+[Install]
+WantedBy=timers.target

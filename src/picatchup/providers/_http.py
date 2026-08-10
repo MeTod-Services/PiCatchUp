@@ -100,10 +100,13 @@ def _send(request: urllib.request.Request, *, timeout: float) -> dict[str, Any]:
                 raw = response.read()
         except urllib.error.HTTPError as error:
             if error.code in RETRY_STATUSES and attempt < ATTEMPTS:
+                error.close()
                 time.sleep(2**attempt)
                 continue
-            detail = _summarise(error.read())
-            raise ProviderError(f"{host} answered {error.code}: {detail}") from None
+            # Provider bodies are untrusted and can echo submitted lesson or
+            # question text. Status + host are actionable without logging body.
+            error.close()
+            raise ProviderError(f"{host} answered HTTP {error.code}") from None
         except urllib.error.URLError as error:
             if attempt < ATTEMPTS:
                 time.sleep(2**attempt)
@@ -119,20 +122,3 @@ def _send(request: urllib.request.Request, *, timeout: float) -> dict[str, Any]:
         return answer
 
     raise AssertionError("the retry loop always returns or raises")
-
-
-def _summarise(body: bytes) -> str:
-    """Turn an error body into one short line fit for a terminal."""
-    text = body.decode("utf-8", errors="replace").strip()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError:
-        parsed = None
-    if isinstance(parsed, dict):
-        error = parsed.get("error")
-        if isinstance(error, dict) and isinstance(error.get("message"), str):
-            text = error["message"]
-        elif isinstance(parsed.get("description"), str):  # Telegram's wording
-            text = parsed["description"]
-    text = " ".join(text.split())
-    return text[:300] if text else "no details given"

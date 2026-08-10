@@ -7,6 +7,7 @@ import pytest
 
 from picatchup import cli
 from picatchup.cli import main
+from picatchup.diagnostics import Check
 
 
 @pytest.fixture(autouse=True)
@@ -50,6 +51,53 @@ def test_unknown_command_is_refused(isolated_data_dir: Path) -> None:
         main(["transcribe"])
 
 
+def test_doctor_reports_checks_and_sets_a_failure_exit(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        cli.diagnostics,
+        "doctor",
+        lambda settings: [Check("database", True, "ok"), Check("OLED", False, "missing")],
+    )
+
+    assert main(["doctor"]) == 1
+    output = capsys.readouterr().out
+    assert "[OK" in output and "[FAIL" in output
+
+
+def test_status_succeeds_when_database_is_healthy(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cli.diagnostics,
+        "status",
+        lambda settings: [Check("database", True, "ok"), Check("OLED", False, "disabled")],
+    )
+
+    assert main(["status"]) == 0
+
+
+def test_backup_command_creates_a_snapshot(isolated_data_dir: Path) -> None:
+    assert main(["init"]) == 0
+    assert main(["backup"]) == 0
+    assert len(list((isolated_data_dir / "backups").glob("picatchup-*.db"))) == 1
+
+
+def test_manual_record_never_overwrites_a_same_second_name(
+    isolated_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_record(destination: Path, **options: object) -> Path:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"audio")
+        return destination
+
+    monkeypatch.setattr(cli.audio, "record", fake_record)
+
+    assert main(["record", "--subject", "Matematica"]) == 0
+    assert main(["record", "--subject", "Matematica"]) == 0
+    recordings = list((isolated_data_dir / "inbox").glob("*.mp3"))
+    assert len(recordings) == 2
+    assert len({path.name for path in recordings}) == 2
+
+
 def test_buttons_command_starts_the_gpio_listener(monkeypatch: pytest.MonkeyPatch) -> None:
     called = False
 
@@ -60,6 +108,34 @@ def test_buttons_command_starts_the_gpio_listener(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(cli.buttons, "listen", fake_listen)
 
     assert main(["buttons"]) == 0
+    assert called
+
+
+def test_device_command_starts_the_hardware_controller(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = False
+
+    def fake_listen(settings: object) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(cli.device, "listen", fake_listen)
+
+    assert main(["device"]) == 0
+    assert called
+
+
+def test_bot_command_starts_long_polling(
+    isolated_data_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    called = False
+
+    def fake_run(conn: sqlite3.Connection, settings: object) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(cli.bot, "run", fake_run)
+
+    assert main(["bot"]) == 0
     assert called
 
 

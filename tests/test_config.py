@@ -37,6 +37,9 @@ def test_defaults_apply_without_an_env_file(tmp_path: Path) -> None:
 
     assert settings.audio_retention_days == 7
     assert settings.gpio_button_pin == 17
+    assert settings.gpio_led_pin == 27
+    assert settings.oled_i2c_address == 0x3C
+    assert settings.backup_retention_count == 14
     assert settings.timezone == "Europe/Rome"
     assert settings.groq_api_key == "", "a missing secret is empty, not an error"
 
@@ -61,6 +64,13 @@ def test_secrets_lists_only_the_values_that_were_set(tmp_path: Path) -> None:
         ("AUDIO_RETENTION_DAYS=soon", "must be a whole number"),
         ("AUDIO_RETENTION_DAYS=0", "must be at least 1"),
         ("GPIO_BUTTON_PIN=not-a-pin", "must be a whole number"),
+        ("OLED_I2C_ADDRESS=not-an-address", "must be a whole number"),
+        ("DISPLAY_ENABLED=perhaps", "must be true or false"),
+        ("GPIO_LED_PIN=17", "must be different"),
+        ("GPIO_BUTTON_PIN=2", "reserved for the configured I2C OLED"),
+        ("OLED_WIDTH=64", "supports OLED_WIDTH=128"),
+        ("LOG_LEVEL=LOUD", "LOG_LEVEL must be"),
+        ("TIMEZONE=Nowhere/Imaginary", "TIMEZONE is not available"),
     ],
 )
 def test_bad_values_explain_themselves(tmp_path: Path, line: str, expected: str) -> None:

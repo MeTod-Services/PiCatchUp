@@ -1,5 +1,22 @@
 # PiCatchUp — The Plan
 
+## Raspberry Pi MVP completion (2026-08-10)
+
+The repository baseline is green (78 tests, Ruff, strict mypy). This implementation
+pass completes the remaining MVP in this order:
+
+1. fix date precedence, retention independence, forced-recap delivery invalidation,
+   and harden ffmpeg recording validation;
+2. add FTS5 retrieval, grounded Italian Q&A, and the long-polling allowlisted bot;
+3. add testable LED/OLED/status adapters and integrate the one-button device loop;
+4. add backup, doctor/status commands, daily status reporting, and regression/e2e tests;
+5. add systemd units, the idempotent Raspberry Pi installer, CI, hardware/privacy/
+   acceptance documentation, then run the complete quality gate.
+
+Hardware adapters are tested with fakes on development hosts. Physical GPIO, OLED,
+USB microphone, I²C coexistence with PiSugar, and service startup remain explicit
+Raspberry Pi acceptance checks rather than being claimed as locally verified.
+
 > **Version 2, simplified.** Version 1 (1606 lines, 25 tasks) is archived in
 > `docs/archive/PLAN-v1.md`. It is not wrong — it is written for a company
 > team. This one is written for us.
@@ -216,7 +233,8 @@ tables have the constraints that stop anything being duplicated). That covers
 
 ## The database
 
-Five real tables plus one virtual table for search. The full schema lives in
+Five application tables, one virtual search table, and one operational bot-state
+singleton. The full schema lives in
 `schema.sql`; here is what each one is for.
 
 | Table | What it holds | Written in |
@@ -227,6 +245,7 @@ Five real tables plus one virtual table for search. The full schema lives in
 | `recaps` | one summary per day | step 3 |
 | `users` | who may use the bot: Telegram id, name, admin flag, active flag | step 4 |
 | `deliveries` | which recap has already been sent to whom | step 4 |
+| `bot_state` | durable Telegram long-poll offset | step 4 |
 
 Two details worth adding immediately, because retrofitting them costs more:
 
@@ -316,10 +335,13 @@ is why it was unmanageable.
 
 ---
 
-## Right now
+## Current state
 
-1. Step 1, together, one afternoon.
-2. Record a real lesson (one of your own, where you do the talking) and keep it
-   as your test file.
-3. Step 2 — and the day you watch the text of your own voice come out of the
-   terminal, the project is alive.
+Steps 1–6 are implemented for the Raspberry Pi MVP: local recording, timed
+transcription, recap generation, allowlisted Telegram long polling, FTS5-grounded
+questions, retention, backups, diagnostics, OLED/LED/button control and systemd
+automation. Automated tests use fake providers and hardware backends.
+
+The remaining acceptance work is physical rather than an unfinished software
+step: complete `docs/RPI_CHECKLIST.md` on the target Pi before classroom use and
+obtain the authorizations described in `docs/PRIVACY.md`.

@@ -125,8 +125,18 @@ def listen(settings: Settings) -> None:
         f"ready — button on GPIO{settings.gpio_button_pin} and GND; "
         "press once to record, again to stop"
     )
+    shutdown = Event()
+    previous = {number: signal.getsignal(number) for number in (signal.SIGINT, signal.SIGTERM)}
+
+    def request_shutdown(signum: int, frame: object) -> None:
+        shutdown.set()
+
+    for number in previous:
+        signal.signal(number, request_shutdown)
     try:
-        signal.pause()
+        shutdown.wait()
     finally:
         button.close()
         controller.stop_and_wait()
+        for number, handler in previous.items():
+            signal.signal(number, handler)

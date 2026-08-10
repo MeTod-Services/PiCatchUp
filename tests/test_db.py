@@ -8,7 +8,7 @@ import pytest
 from picatchup import db
 from picatchup.util import new_id, utc_now
 
-TABLES = {"lessons", "chunks", "chunks_fts", "recaps", "users", "deliveries"}
+TABLES = {"lessons", "chunks", "chunks_fts", "recaps", "users", "deliveries", "bot_state"}
 
 
 @pytest.fixture

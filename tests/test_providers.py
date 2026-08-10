@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from picatchup.domain import Update
 from picatchup.errors import ProviderError
 from picatchup.providers import _http, groq_audio, groq_text, telegram
 
@@ -110,8 +111,9 @@ class TestGroqAudio:
         recording.write_bytes(b"audio")
         server.answers = [(401, {"error": {"message": "Invalid API Key"}})]
 
-        with pytest.raises(ProviderError, match="answered 401: Invalid API Key"):
+        with pytest.raises(ProviderError, match="answered HTTP 401") as caught:
             groq_audio.transcribe(recording, api_key="wrong", model="whisper-test")
+        assert "Invalid API Key" not in str(caught.value)
 
 
 class TestGroqText:
@@ -161,8 +163,72 @@ class TestTelegram:
     def test_being_blocked_says_so(self, server: Received) -> None:
         server.answers = [(403, {"ok": False, "description": "bot was blocked by the user"})]
 
-        with pytest.raises(ProviderError, match="bot was blocked by the user"):
+        with pytest.raises(ProviderError, match="answered HTTP 403"):
             telegram.send_message("ciao", token="tok", chat_id=1)
+
+    def test_long_poll_returns_flattened_updates(self, server: Received) -> None:
+        server.answers = [
+            (
+                200,
+                {
+                    "ok": True,
+                    "result": [
+                        {"not_an_update": True},
+                        {"update_id": 7, "callback_query": {}},
+                        {
+                            "update_id": 8,
+                            "message": {
+                                "message_id": 12,
+                                "from": {"id": 111},
+                                "chat": {"id": 111, "type": "private"},
+                                "text": "ciao",
+                            },
+                        },
+                    ],
+                },
+            )
+        ]
+
+        updates = telegram.get_updates("tok", 5, 12)
+
+        assert server.path == "/bottok/getUpdates?offset=5&timeout=12"
+        assert updates == [
+            telegram.Update(7, None, None, None, None, None),
+            telegram.Update(8, 111, 111, "private", 12, "ciao"),
+        ]
+
+    def test_reads_membership_only_group_updates_so_the_bot_can_leave(
+        self, server: Received
+    ) -> None:
+        server.answers = [
+            (
+                200,
+                {
+                    "ok": True,
+                    "result": [
+                        {
+                            "update_id": 10,
+                            "my_chat_member": {
+                                "from": {"id": 111},
+                                "chat": {"id": -99, "type": "group"},
+                            },
+                        }
+                    ],
+                },
+            )
+        ]
+
+        assert telegram.get_updates("tok", 0, 10) == [
+            Update(10, 111, -99, "group", None, None)
+        ]
+
+    def test_leaves_a_group(self, server: Received) -> None:
+        server.answers = [(200, {"ok": True, "result": True})]
+
+        telegram.leave_chat("tok", -99)
+
+        assert server.path == "/bottok/leaveChat"
+        assert json.loads(server.body) == {"chat_id": -99}
 
     def test_recent_chats_ignores_groups(self, server: Received) -> None:
         server.answers = [

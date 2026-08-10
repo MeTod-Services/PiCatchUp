@@ -15,6 +15,7 @@ import sqlite3
 import tempfile
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 
 from picatchup import audio
@@ -29,6 +30,7 @@ from picatchup.util import new_id, today, utc_now
 CHUNK_SIZE = 700
 
 Transcriber = Callable[[Path], Transcription]
+Progress = Callable[[int, int], None]
 
 log = logging.getLogger(__name__)
 
@@ -69,9 +71,11 @@ def transcribe_file(
     *,
     lesson_date: str | None = None,
     subject: str | None = None,
+    fallback_date: str | None = None,
     transcriber: Transcriber | None = None,
+    progress: Progress | None = None,
 ) -> Lesson:
-    """Store the audio, send it to Whisper, save the text and its chunks."""
+    """Store audio and transcription using explicit > filename > fallback date."""
     if not source.is_file():
         raise PiCatchUpError(f"{source} is not a file")
     audio.ensure_ffmpeg()
@@ -84,35 +88,45 @@ def transcribe_file(
         )
 
     guessed_date, guessed_subject = read_name(source)
-    lesson_date = lesson_date or guessed_date or today(settings.timezone)
+    lesson_date = lesson_date or guessed_date or fallback_date or today(settings.timezone)
     subject = subject or guessed_subject
 
     stored = _store(settings, source, checksum, lesson_date)
-    duration = audio.duration_ms(stored)
+    try:
+        duration = audio.duration_ms(stored)
 
-    transcriber = transcriber or _groq(settings)
-    transcription = _transcribe_whole(stored, settings, transcriber)
-    segments = transcription.segments or (
-        # Some models answer with the text and no timings at all. One segment
-        # covering the whole recording keeps every later query working; it just
-        # cites the lesson rather than the minute.
-        (Segment(start_ms=0, end_ms=duration, text=transcription.text),)
-        if transcription.text
-        else ()
-    )
-    chunks = build_chunks(segments)
+        transcriber = transcriber or _groq(settings)
+        log.info("transcription_started file=%s", source.name)
+        transcription = _transcribe_whole(stored, settings, transcriber, progress=progress)
+        segments = transcription.segments or (
+            # Some models answer with the text and no timings at all. One segment
+            # covering the whole recording keeps every later query working; it just
+            # cites the lesson rather than the minute.
+            (Segment(start_ms=0, end_ms=duration, text=transcription.text),)
+            if transcription.text
+            else ()
+        )
+        chunks = build_chunks(segments)
 
-    lesson = Lesson(
-        id=new_id(),
-        lesson_date=lesson_date,
-        subject=subject,
-        audio_path=stored,
-        duration_ms=duration,
-        text=transcription.text,
-        chunks=len(chunks),
-    )
-    _save(conn, lesson, checksum, chunks)
-    log.info("saved lesson %s (%d chunks)", lesson.id, len(chunks))
+        lesson = Lesson(
+            id=new_id(),
+            lesson_date=lesson_date,
+            subject=subject,
+            audio_path=stored,
+            duration_ms=duration,
+            text=transcription.text,
+            chunks=len(chunks),
+        )
+        _save(conn, lesson, checksum, chunks)
+    except Exception:
+        # The original source still exists (daily leaves it in the inbox). Do
+        # not retain an untracked copy that no database retention query can see.
+        try:
+            stored.unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            log.warning("could not remove failed audio copy %s: %s", stored.name, cleanup_error)
+        raise
+    log.info("transcription_completed lesson=%s chunks=%d", lesson.id, len(chunks))
     return lesson
 
 
@@ -130,10 +144,16 @@ def _groq(settings: Settings) -> Transcriber:
 
 
 def _transcribe_whole(
-    stored: Path, settings: Settings, transcriber: Transcriber
+    stored: Path,
+    settings: Settings,
+    transcriber: Transcriber,
+    *,
+    progress: Progress | None = None,
 ) -> Transcription:
     """One upload if the file is small, otherwise piece by piece."""
     if stored.stat().st_size <= settings.max_upload_mb * 1_000_000:
+        if progress is not None:
+            progress(1, 1)
         return transcriber(stored)
 
     with tempfile.TemporaryDirectory(prefix="picatchup-") as workspace:
@@ -143,6 +163,8 @@ def _transcribe_whole(
         offset_ms = 0
         for number, piece in enumerate(pieces, start=1):
             log.info("piece %d of %d", number, len(pieces))
+            if progress is not None:
+                progress(number, len(pieces))
             part = transcriber(piece)
             texts.append(part.text)
             segments.extend(shift(part.segments, offset_ms))
@@ -203,6 +225,10 @@ def read_name(path: Path) -> tuple[str | None, str | None]:
     stem = path.stem
     match = _DATE.match(stem)
     if match is None:
+        return None, None
+    try:
+        date.fromisoformat(match.group(1))
+    except ValueError:
         return None, None
 
     rest = stem[match.end() :].strip(" -_")
