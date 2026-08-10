@@ -14,3 +14,15 @@ class PiCatchUpError(Exception):
 
 class ConfigError(PiCatchUpError):
     """A setting is missing or makes no sense."""
+
+
+class AudioError(PiCatchUpError):
+    """ffmpeg is missing, or it refused a file we handed it."""
+
+
+class RaspberryPiError(PiCatchUpError):
+    """GPIO support is missing, unavailable, or misconfigured."""
+
+
+class ProviderError(PiCatchUpError):
+    """The outside world (Groq, Telegram) said no, or could not be reached."""

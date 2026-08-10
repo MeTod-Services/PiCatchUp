@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from picatchup import cli
 from picatchup.cli import main
 
 
@@ -47,6 +48,19 @@ def test_a_broken_env_file_prints_a_message_not_a_traceback(
 def test_unknown_command_is_refused(isolated_data_dir: Path) -> None:
     with pytest.raises(SystemExit):
         main(["transcribe"])
+
+
+def test_buttons_command_starts_the_gpio_listener(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = False
+
+    def fake_listen(settings: object) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(cli.buttons, "listen", fake_listen)
+
+    assert main(["buttons"]) == 0
+    assert called
 
 
 def test_the_database_is_usable_after_init(isolated_data_dir: Path) -> None:

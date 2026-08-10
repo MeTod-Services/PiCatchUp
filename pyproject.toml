@@ -12,6 +12,7 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["mypy>=1.11", "pytest>=8.0", "ruff>=0.6"]
+rpi = ["gpiozero>=2.0", "lgpio>=0.2.2.0"]
 
 [project.scripts]
 picatchup = "picatchup.cli:main"
@@ -23,10 +24,10 @@ version = { attr = "picatchup.__version__" }
 where = ["src"]
 include = ["picatchup*"]
 
-# schema.sql travels with the installed package, so `picatchup init` works
-# from anywhere, not just from inside the project folder.
+# schema.sql and the prompts travel with the installed package, so the commands
+# work from anywhere, not just from inside the project folder.
 [tool.setuptools.package-data]
-picatchup = ["schema.sql"]
+picatchup = ["schema.sql", "prompts/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

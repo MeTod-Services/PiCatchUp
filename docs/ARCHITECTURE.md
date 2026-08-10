@@ -22,16 +22,22 @@ Groq and Telegram. This is the only place allowed to make a network call, and
 the only place allowed to `import groq` or touch HTTP. Every function here takes
 ordinary values in and gives ordinary values back.
 
-**3. The assembly line — `transcribe.py`, `recap.py`, `search.py`, `qa.py`**
+**3. The assembly line — `transcribe.py`, `recap.py`, `deliver.py`, `search.py`, `qa.py`**
 The actual work. Each module takes something from the warehouse, does one
 transformation to it (possibly asking the outside world for help), and puts the
 result back. These modules know nothing about Groq or Telegram — they are handed
 a provider and call it.
 
-**4. The face — `cli.py`, `bot.py`, `daily.py`**
-How a human or a clock starts the work. The CLI is for you; the bot is for your
-classmates; `daily.py` is for cron. None of these three contain real logic:
-they parse an input, call the assembly line, print or send the result.
+Two smaller files sit alongside them: `users.py` (who is allowed to receive
+anything) and `audio.py`, the only place that knows an ffmpeg command line.
+`audio.py` runs a program on this machine rather than calling a server, which is
+why it is not a provider.
+
+**4. The face — `cli.py`, `buttons.py`, `bot.py`, `daily.py`**
+How a human or a clock starts the work. The CLI and the Raspberry Pi recording
+button are for you; the bot is for your classmates; `daily.py` is for cron.
+None of these contain real logic: they parse an input or a GPIO press, call the
+assembly line, print or send the result.
 
 ---
 
@@ -44,7 +50,7 @@ they parse an input, call the assembly line, print or send the result.
        |                       |                       |
        +-----------+-----------+-----------+-----------+
                                |
-    transcribe.py     recap.py     search.py     qa.py           ASSEMBLY LINE
+   transcribe.py  recap.py  deliver.py  search.py  qa.py         ASSEMBLY LINE
                                |
               +----------------+----------------+
               |                                 |

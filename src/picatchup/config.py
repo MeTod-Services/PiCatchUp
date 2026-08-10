@@ -25,12 +25,19 @@ class Settings:
     telegram_bot_token: str
     transcription_model: str
     text_model: str
+    language: str
     data_dir: Path
     db_path: Path
     inbox_dir: Path
     audio_dir: Path
     backup_dir: Path
     audio_retention_days: int
+    audio_input_format: str
+    audio_input_device: str
+    audio_bitrate: str
+    gpio_button_pin: int
+    max_upload_mb: int
+    segment_minutes: int
     timezone: str
     log_level: str
 
@@ -58,12 +65,19 @@ def load_settings(env_file: str | Path = ".env") -> Settings:
         telegram_bot_token=values.get("TELEGRAM_BOT_TOKEN", "").strip(),
         transcription_model=values.get("TRANSCRIPTION_MODEL", "whisper-large-v3-turbo").strip(),
         text_model=values.get("TEXT_MODEL", "").strip(),
+        language=values.get("LANGUAGE", "it").strip(),
         data_dir=data_dir,
         db_path=data_dir / "picatchup.db",
         inbox_dir=data_dir / "inbox",
         audio_dir=data_dir / "audio",
         backup_dir=data_dir / "backups",
         audio_retention_days=_positive_int(values, "AUDIO_RETENTION_DAYS", default=7),
+        audio_input_format=values.get("AUDIO_INPUT_FORMAT", "pulse").strip(),
+        audio_input_device=values.get("AUDIO_INPUT_DEVICE", "default").strip(),
+        audio_bitrate=values.get("AUDIO_BITRATE", "48k").strip(),
+        gpio_button_pin=_positive_int(values, "GPIO_BUTTON_PIN", default=17),
+        max_upload_mb=_positive_int(values, "MAX_UPLOAD_MB", default=20),
+        segment_minutes=_positive_int(values, "SEGMENT_MINUTES", default=10),
         timezone=values.get("TIMEZONE", "Europe/Rome").strip(),
         log_level=values.get("LOG_LEVEL", "INFO").strip().upper(),
     )
