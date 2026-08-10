@@ -40,6 +40,7 @@ def test_defaults_apply_without_an_env_file(tmp_path: Path) -> None:
     assert settings.gpio_led_pin == 27
     assert settings.oled_i2c_address == 0x3C
     assert settings.backup_retention_count == 14
+    assert settings.backup_remote == ""
     assert settings.timezone == "Europe/Rome"
     assert settings.groq_api_key == "", "a missing secret is empty, not an error"
 

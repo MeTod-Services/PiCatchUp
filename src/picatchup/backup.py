@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
+import subprocess
 from contextlib import closing
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,10 +18,11 @@ log = logging.getLogger(__name__)
 
 _BACKUP_PREFIX = "picatchup-"
 _BACKUP_GLOB = f"{_BACKUP_PREFIX}*.db"
+_REMOTE_RE = re.compile(r"(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+:/[A-Za-z0-9._/-]+")
 
 
 class BackupError(PiCatchUpError):
-    """A database snapshot could not be created or verified."""
+    """A database snapshot could not be created, verified, or transferred."""
 
 
 def create_backup(settings: Settings, *, now: datetime | None = None) -> Path:
@@ -29,6 +32,8 @@ def create_backup(settings: Settings, *, now: datetime | None = None) -> Path:
     source database uses WAL and another process is reading it.  The copy is
     first written under a temporary name in the backup directory; it only
     becomes visible under its final name after ``integrity_check`` succeeds.
+    When ``BACKUP_REMOTE`` is set, the verified snapshot is then sent there
+    with rsync over SSH (including over a Tailscale address).
     """
     if not settings.db_path.is_file():
         raise BackupError(f"database does not exist: {settings.db_path}")
@@ -44,6 +49,8 @@ def create_backup(settings: Settings, *, now: datetime | None = None) -> Path:
         _copy_and_verify(settings.db_path, temporary)
         temporary.replace(destination)
         _rotate(settings.backup_dir, settings.backup_retention_count)
+        if settings.backup_remote:
+            _send_remote(destination, settings.backup_remote)
     except BackupError:
         temporary.unlink(missing_ok=True)
         raise
@@ -53,6 +60,59 @@ def create_backup(settings: Settings, *, now: datetime | None = None) -> Path:
 
     log.info("backup_created path=%s", destination)
     return destination
+
+
+def _send_remote(snapshot: Path, remote: str) -> None:
+    """Send one verified snapshot to an rsync SSH destination directory."""
+    if _REMOTE_RE.fullmatch(remote) is None or remote.partition(":")[2].strip("/") == "":
+        raise BackupError(
+            "BACKUP_REMOTE must look like user@tailscale-host:/existing/directory/"
+        )
+
+    destination = remote.rstrip("/") + "/"
+    try:
+        result = subprocess.run(
+            [
+                "rsync",
+                "--archive",
+                "--rsh=ssh -o BatchMode=yes",
+                "--timeout=120",
+                "--",
+                str(snapshot),
+                destination,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+    except FileNotFoundError:
+        raise BackupError(
+            f"local backup created at {snapshot}, but rsync is not installed"
+        ) from None
+    except subprocess.TimeoutExpired:
+        raise BackupError(
+            f"local backup created at {snapshot}, but rsync to BACKUP_REMOTE timed out"
+        ) from None
+    except OSError as error:
+        raise BackupError(
+            f"local backup created at {snapshot}, but rsync could not start: {error}"
+        ) from None
+
+    if result.returncode != 0:
+        detail = _last_error_line(result.stderr)
+        suffix = f": {detail}" if detail else ""
+        raise BackupError(
+            f"local backup created at {snapshot}, but rsync to BACKUP_REMOTE failed "
+            f"(exit {result.returncode}){suffix}"
+        )
+
+    log.info("backup_remote_synced file=%s remote=%s", snapshot.name, destination)
+
+
+def _last_error_line(stderr: str) -> str:
+    lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+    return lines[-1] if lines else ""
 
 
 def _copy_and_verify(source_path: Path, destination_path: Path) -> None:

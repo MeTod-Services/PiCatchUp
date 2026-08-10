@@ -65,7 +65,11 @@ spento e il timer non parte, la pulizia avviene alla prima esecuzione successiva
 
 Trascrizioni e riassunti restano in SQLite finché l'operatore non elimina il
 database o i dati interessati. I backup contengono gli stessi dati testuali;
-sono ruotati conservando per impostazione predefinita i 14 più recenti.
+quelli locali sono ruotati conservando per impostazione predefinita i 14 più
+recenti. Se `BACKUP_REMOTE` è configurato, ogni snapshot verificato viene anche
+copiato via rsync/SSH sul NAS indicato (Tailscale fornisce solo il collegamento
+privato). PiCatchUp non elimina automaticamente le copie remote: protezione,
+retention e cancellazione sul NAS restano responsabilità dell'operatore.
 
 ## Rimozione di un utente
 

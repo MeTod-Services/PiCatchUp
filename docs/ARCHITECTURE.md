@@ -136,5 +136,8 @@ the teacher said.
 ## Backups
 
 `picatchup backup` uses SQLite's online-safe mechanism, verifies the resulting
-database, and rotates timestamped files under `data/backups/`. Backups contain
-private text and need the same permissions as the live database.
+database, and rotates timestamped files under `data/backups/`. When
+`BACKUP_REMOTE` is configured, it also sends the verified snapshot with rsync
+over SSH to that directory; this works through Tailscale without copying the
+live SQLite/WAL files. Backups contain private text and need the same permissions
+as the live database. Remote retention is the NAS operator's responsibility.

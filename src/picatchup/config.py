@@ -32,6 +32,7 @@ class Settings:
     inbox_dir: Path
     audio_dir: Path
     backup_dir: Path
+    backup_remote: str
     audio_retention_days: int
     audio_input_format: str
     audio_input_device: str
@@ -80,6 +81,7 @@ def load_settings(env_file: str | Path = ".env") -> Settings:
         inbox_dir=data_dir / "inbox",
         audio_dir=data_dir / "audio",
         backup_dir=data_dir / "backups",
+        backup_remote=values.get("BACKUP_REMOTE", "").strip(),
         audio_retention_days=_positive_int(values, "AUDIO_RETENTION_DAYS", default=7),
         audio_input_format=values.get("AUDIO_INPUT_FORMAT", "pulse").strip(),
         audio_input_device=values.get("AUDIO_INPUT_DEVICE", "default").strip(),

@@ -27,7 +27,7 @@ SYSTEM_TIMEZONE=${PICATCHUP_TIMEZONE:-Europe/Rome}
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y python3 python3-venv python3-dev build-essential ffmpeg alsa-utils \
-  sqlite3 i2c-tools libjpeg-dev zlib1g-dev
+  sqlite3 rsync openssh-client i2c-tools libjpeg-dev zlib1g-dev
 
 for group in audio gpio i2c; do
   getent group "$group" >/dev/null || groupadd --system "$group"

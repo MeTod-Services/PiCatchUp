@@ -111,6 +111,8 @@ OLED_I2C_ADDRESS=0x3C
 OLED_WIDTH=128
 OLED_HEIGHT=64
 BACKUP_RETENTION_COUNT=14
+# Optional: rsync over SSH to a NAS reachable through Tailscale
+BACKUP_REMOTE=backup@picatchup-nas.tailnet.ts.net:/volume1/backups/picatchup/
 ```
 
 With multiple microphones, use explicit `plughw:CARD,DEVICE` based on `arecord -l`.
@@ -280,11 +282,36 @@ picatchup backup
 
 This uses SQLite's online backup API, verifies `PRAGMA integrity_check`, atomically
 publishes a timestamped file under `DATA_DIR/backups`, and retains the newest
-`BACKUP_RETENTION_COUNT` (14 by default). Backups contain private transcript
-text and require the same protection as the live database. To restore, stop the
-bot/device/timers, verify the chosen snapshot with `PRAGMA integrity_check`,
-copy it to `DATA_DIR/picatchup.db` with owner `picatchup:picatchup`, then start
-the services; keep the replaced database until the restore is accepted.
+`BACKUP_RETENTION_COUNT` (14 by default). If `BACKUP_REMOTE` is set, the verified
+snapshot is then copied with `rsync` over SSH. A Tailscale MagicDNS name or
+`100.x.y.z` address works like any other SSH host; PiCatchUp never copies the
+live WAL database directly.
+
+For unattended NAS copies, first create a dedicated NAS account and destination
+directory. Then configure SSH for the unprivileged service user (not root):
+
+```bash
+sudo install -d -o picatchup -g picatchup -m 0700 /var/lib/picatchup/.ssh
+sudo -u picatchup ssh-keygen -t ed25519 -N '' \
+  -f /var/lib/picatchup/.ssh/id_ed25519
+# Add id_ed25519.pub to the NAS account's authorized_keys, then verify/trust it:
+sudo -u picatchup ssh backup@picatchup-nas.tailnet.ts.net true
+sudoedit /etc/picatchup/picatchup.env
+# BACKUP_REMOTE=backup@picatchup-nas.tailnet.ts.net:/volume1/backups/picatchup/
+sudo -u picatchup bash -c 'cd /var/lib/picatchup && picatchup backup'
+```
+
+The remote directory must already exist and the NAS user should have access only
+to that backup directory. An rsync/SSH error makes the command fail so systemd
+records it, while the verified local snapshot remains available. Remote files
+are not deleted automatically; configure retention or snapshots on the NAS.
+Use `journalctl -u picatchup-backup` to inspect failures.
+
+Backups contain private transcript text and require the same protection as the
+live database. To restore, stop the bot/device/timers, verify the chosen snapshot
+with `PRAGMA integrity_check`, copy it to `DATA_DIR/picatchup.db` with owner
+`picatchup:picatchup`, then start the services; keep the replaced database until
+the restore is accepted.
 
 ## Privacy and failure modes
 

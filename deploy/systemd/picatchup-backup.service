@@ -1,6 +1,7 @@
 [Unit]
 Description=PiCatchUp safe SQLite backup
-After=local-fs.target
+Wants=network-online.target
+After=local-fs.target network-online.target tailscaled.service
 
 [Service]
 Type=oneshot
