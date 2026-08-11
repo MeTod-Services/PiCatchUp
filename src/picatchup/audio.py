@@ -24,7 +24,8 @@ from picatchup.errors import AudioError
 # Speech, not music: one channel at 16 kHz is what Whisper listens to anyway,
 # and it turns two hours of lesson into a file you can actually upload.
 CHANNELS = "1"
-SAMPLE_RATE = "16000"
+INPUT_SAMPLE_RATE = "48000"
+OUTPUT_SAMPLE_RATE = "16000"
 
 # Audio we know how to send to Whisper. Anything else we convert first.
 KNOWN_SUFFIXES = frozenset(
@@ -175,14 +176,14 @@ def record(
     if input_format == "alsa":
         # These are input constraints; plughw performs conversion for simple
         # USB Audio Class microphones that expose another native format.
-        command += ["-ac", CHANNELS, "-ar", SAMPLE_RATE]
+        command += ["-ac", CHANNELS, "-ar", INPUT_SAMPLE_RATE]
     command += [
         "-i",
         device,
         "-ac",
         CHANNELS,
         "-ar",
-        SAMPLE_RATE,
+        OUTPUT_SAMPLE_RATE,
         "-c:a",
         "libmp3lame",
         "-b:a",

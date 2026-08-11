@@ -202,3 +202,72 @@ def _message_id(answer: dict[str, Any]) -> int:
     if not isinstance(message_id, int):
         raise ProviderError("Telegram accepted the message but returned no id")
     return message_id
+
+
+def send_document(
+    path,
+    *,
+    token: str,
+    chat_id: int,
+    caption: str | None = None,
+    timeout: float = 60.0,
+) -> int:
+    """Send one local document to a Telegram private chat."""
+
+    import json
+    import uuid
+    from pathlib import Path
+    from urllib import request as urllib_request
+
+    file_path = Path(path)
+
+    if not file_path.is_file():
+        raise ProviderError(f"document does not exist: {file_path.name}")
+
+    boundary = f"----PiCatchUp{uuid.uuid4().hex}"
+    body = bytearray()
+
+    def field(name: str, value: str) -> None:
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
+        )
+        body.extend(value.encode("utf-8"))
+        body.extend(b"\r\n")
+
+    field("chat_id", str(chat_id))
+
+    if caption:
+        field("caption", caption)
+
+    body.extend(f"--{boundary}\r\n".encode())
+    body.extend(
+        (
+            'Content-Disposition: form-data; name="document"; '
+            f'filename="{file_path.name}"\r\n'
+        ).encode()
+    )
+    body.extend(b"Content-Type: application/pdf\r\n\r\n")
+    body.extend(file_path.read_bytes())
+    body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode())
+
+    req = urllib_request.Request(
+        f"{API}/bot{token}/sendDocument",
+        data=bytes(body),
+        method="POST",
+    )
+    req.add_header(
+        "Content-Type",
+        f"multipart/form-data; boundary={boundary}",
+    )
+    req.add_header("User-Agent", "PiCatchUp/1.0")
+
+    try:
+        with urllib_request.urlopen(req, timeout=timeout) as response:
+            answer = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        raise ProviderError("Telegram document upload failed") from None
+
+    _require_ok(answer, "sendDocument")
+    return _message_id(answer)

@@ -1,0 +1,92 @@
+from __future__ import annotations
+
+import logging
+import time
+from collections.abc import Callable
+from threading import Event, Thread
+
+log = logging.getLogger(__name__)
+
+
+class PiSugarButton:
+    def __init__(
+        self,
+        callback: Callable[[], None],
+        *,
+        bus_number: int = 1,
+        address: int = 0x57,
+        max_click_seconds: float = 1.0,
+    ) -> None:
+        self._callback = callback
+        self._bus_number = bus_number
+        self._address = address
+        self._max_click_seconds = max_click_seconds
+
+        self._stop = Event()
+        self._thread = Thread(
+            target=self._run,
+            name="picatchup-pisugar-button",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def close(self) -> None:
+        self._stop.set()
+        self._thread.join(timeout=2)
+
+    def _run(self) -> None:
+        try:
+            import smbus
+        except ImportError:
+            log.error("python3-smbus non installato")
+            return
+
+        bus = smbus.SMBus(self._bus_number)
+
+        pressed_at: float | None = None
+        previous = False
+
+        try:
+            while not self._stop.is_set():
+                try:
+                    value = bus.read_byte_data(self._address, 0x02)
+                    pressed = bool(value & 0x01)
+                except OSError as error:
+                    # PiSugar can occasionally NACK an I2C read.
+                    log.debug("PiSugar I2C temporary error: %s", error)
+                    self._stop.wait(0.05)
+                    continue
+
+                now = time.monotonic()
+
+                if pressed and not previous:
+                    pressed_at = now
+
+                elif not pressed and previous:
+                    if pressed_at is not None:
+                        duration = now - pressed_at
+
+                        if duration < self._max_click_seconds:
+                            log.info(
+                                "PiSugar short press %.2fs",
+                                duration,
+                            )
+                            try:
+                                self._callback()
+                            except Exception:
+                                log.exception("PiSugar button callback failed")
+                        else:
+                            log.info(
+                                "PiSugar long press %.2fs ignored by PiCatchUp",
+                                duration,
+                            )
+
+                    pressed_at = None
+
+                previous = pressed
+                self._stop.wait(0.03)
+
+        finally:
+            bus.close()

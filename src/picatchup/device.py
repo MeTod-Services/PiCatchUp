@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 import queue
 import signal
+import subprocess
+import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -20,9 +22,10 @@ from types import FrameType
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from picatchup import audio, hardware
+from picatchup import audio, hardware, latest
 from picatchup.config import Settings
 from picatchup.display import Display, create_display
+from picatchup.pisugar import PiSugarButton
 from picatchup.errors import RaspberryPiError
 from picatchup.status import DeviceStatus, Status, StatusFile
 
@@ -100,6 +103,7 @@ class DeviceController:
         self._recorder_thread: Thread | None = None
         self._recording_stop: Event | None = None
         self._recording_started: float | None = None
+        self._processing = False
         self._snapshot = DeviceStatus(Status.BOOTING)
         self._last_seen_snapshot = self._snapshot
         self._closed = False
@@ -131,7 +135,8 @@ class DeviceController:
         """GPIO-safe callback: enqueue and return without touching hardware."""
         with self._lock:
             running = self._dispatcher is not None and not self._closed
-        if running:
+            processing = self._processing
+        if running and not processing:
             self._events.put_nowait(_DeviceEvent(_EventKind.PRESS))
 
     def request_shutdown(self) -> None:
@@ -340,13 +345,74 @@ class DeviceController:
             self._recording_stop = None
             self._recording_started = None
             self._recorder_thread = None
+
         if result.error is not None:
             self.update(Status.ERROR, detail=result.error)
             return Status.ERROR
+
         size_mb = result.destination.stat().st_size / 1_000_000
         log.info("saved %s (%.1f MB)", result.destination, size_mb)
-        self.update(Status.SUCCESS, detail="Registrazione salvata")
-        return Status.SUCCESS
+
+        # L'audio è già al sicuro a questo punto. Gli errori successivi
+        # non devono mai cancellare la registrazione originale.
+        with self._lock:
+            self._processing = True
+
+        try:
+            self.update(Status.TRANSCRIBING, detail=result.destination.name)
+
+            transcribe = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "picatchup",
+                    "transcribe",
+                    str(result.destination),
+                    "--subject",
+                    "generale",
+                ],
+                cwd=str(Path(__file__).resolve().parents[2]),
+                capture_output=True,
+                text=True,
+                timeout=1800,
+                check=False,
+            )
+
+            if transcribe.returncode != 0:
+                detail = (transcribe.stderr or transcribe.stdout or "").strip()
+                log.error("automatic transcription failed: %s", detail[-800:])
+                self.update(Status.ERROR, detail="Trascrizione fallita")
+                return Status.ERROR
+
+            log.info("automatic transcription completed: %s", result.destination.name)
+
+            # Riassume SOLO la registrazione appena conclusa e invia
+            # quel riassunto su Telegram.
+            self.update(Status.SUMMARIZING, detail="Riassumo lezione...")
+
+            latest.summarize_and_send(
+                self.settings,
+                result.destination,
+            )
+
+            log.info(
+                "single-recording summary delivered: %s",
+                result.destination.name,
+            )
+            self.update(Status.SUCCESS, detail="Riassunto inviato!")
+            return Status.SUCCESS
+
+        except subprocess.TimeoutExpired:
+            log.error("automatic processing timed out")
+            self.update(Status.ERROR, detail="Elaborazione scaduta")
+            return Status.ERROR
+        except Exception as error:
+            log.exception("automatic processing failed: %s", error)
+            self.update(Status.ERROR, detail="Elaborazione fallita")
+            return Status.ERROR
+        finally:
+            with self._lock:
+                self._processing = False
 
     def _sync_external_status(self) -> Status | None:
         """Render a status written by daily/backup without republishing it."""
@@ -391,9 +457,17 @@ def _ready_detail(settings: Settings) -> str:
     except Exception:
         pass
     try:
-        wifi_state = Path("/sys/class/net/wlan0/operstate").read_text().strip()
-        wifi = "OK" if wifi_state == "up" else "--"
-    except OSError:
+        import subprocess
+
+        result = subprocess.run(
+            ["iw", "dev", "wlan0", "link"],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        wifi = "OK" if "Connected to " in result.stdout else "--"
+    except Exception:
         wifi = "--"
     return f"Mic: {microphone}  WiFi: {wifi}"
 
@@ -401,7 +475,7 @@ def _ready_detail(settings: Settings) -> str:
 def listen(settings: Settings) -> None:
     """Run the standalone device until SIGINT or SIGTERM."""
     controller = DeviceController(settings)
-    button: hardware.ButtonHandle | None = None
+    button: PiSugarButton | None = None
     previous_int = signal.getsignal(signal.SIGINT)
     previous_term = signal.getsignal(signal.SIGTERM)
 
@@ -409,20 +483,13 @@ def listen(settings: Settings) -> None:
         controller.request_shutdown()
 
     controller.start()
-    if settings.gpio_enabled:
-        try:
-            button = hardware.open_button(settings.gpio_button_pin, controller.press)
-            log.info("ready: button on GPIO%d and GND", settings.gpio_button_pin)
-        except Exception as error:
-            log.warning("GPIO button unavailable on GPIO%d: %s", settings.gpio_button_pin, error)
-            controller.update(Status.ERROR, detail="Pulsante non disponibile")
-            time.sleep(5)
-            controller.close()
-            raise RaspberryPiError(
-                f"could not open GPIO{settings.gpio_button_pin} button: {error}"
-            ) from None
-    else:
-        log.info("GPIO button disabled")
+    try:
+        button = PiSugarButton(controller.press)
+        button.start()
+        log.info("PiSugar power button listener ready")
+    except Exception as error:
+        log.warning("PiSugar button unavailable: %s", error)
+        button = None
 
     try:
         signal.signal(signal.SIGINT, stop)

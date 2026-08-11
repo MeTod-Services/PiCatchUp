@@ -1,0 +1,80 @@
+"""Summarize and deliver only the recording that has just been transcribed."""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+from picatchup import audio, recap, users
+from picatchup.config import Settings, require
+from picatchup.errors import PiCatchUpError
+from picatchup.providers import groq_text, telegram
+
+
+def summarize_and_send(settings: Settings, recording: Path) -> str:
+    """Summarize only `recording` and send that summary to Telegram recipients."""
+
+    audio_hash = audio.sha256_of(recording)
+
+    conn = sqlite3.connect(settings.db_path)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        lesson = conn.execute(
+            """
+            SELECT subject, duration_ms, text, lesson_date
+            FROM lessons
+            WHERE audio_sha256 = ?
+              AND text IS NOT NULL
+              AND text != ''
+            LIMIT 1
+            """,
+            (audio_hash,),
+        ).fetchone()
+
+        if lesson is None:
+            raise PiCatchUpError(
+                f"transcribed lesson not found for {recording.name}"
+            )
+
+        model = require(settings.text_model, "TEXT_MODEL")
+        api_key = require(settings.groq_api_key, "GROQ_API_KEY")
+
+        # Riutilizziamo il prompt del recap, ma gli passiamo UNA SOLA lezione.
+        prompt = recap.build_prompt(
+            recap.load_template(),
+            lesson["lesson_date"],
+            [lesson],
+        )
+
+        summary = groq_text.generate(
+            prompt,
+            api_key=api_key,
+            model=model,
+        ).strip()
+
+        if not summary:
+            raise PiCatchUpError("the text provider returned an empty summary")
+
+        token = require(
+            settings.telegram_bot_token,
+            "TELEGRAM_BOT_TOKEN",
+        )
+
+        people = users.recipients(conn)
+        if not people:
+            raise PiCatchUpError(
+                "there is nobody to send it to. Add someone: picatchup user add"
+            )
+
+        for person in people:
+            telegram.send_message(
+                summary,
+                token=token,
+                chat_id=person["telegram_user_id"],
+            )
+
+        return summary
+
+    finally:
+        conn.close()

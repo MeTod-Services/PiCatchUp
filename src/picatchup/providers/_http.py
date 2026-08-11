@@ -12,6 +12,7 @@ as long as this file is a hundred lines.
 from __future__ import annotations
 
 import json
+import mimetypes
 import time
 import urllib.error
 import urllib.parse
@@ -48,6 +49,7 @@ def post_json(
 ) -> dict[str, Any]:
     request = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), method="POST")
     request.add_header("Content-Type", "application/json")
+    request.add_header("User-Agent", "PiCatchUp/1.0")
     for name, value in (headers or {}).items():
         request.add_header(name, value)
     return _send(request, timeout=timeout)
@@ -67,6 +69,7 @@ def post_file(
     body, content_type = _multipart(fields, field_name, filename, content)
     request = urllib.request.Request(url, data=body, method="POST")
     request.add_header("Content-Type", content_type)
+    request.add_header("User-Agent", "PiCatchUp/1.0")
     for name, value in (headers or {}).items():
         request.add_header(name, value)
     return _send(request, timeout=timeout)
@@ -82,9 +85,10 @@ def _multipart(
             f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'
             f"{value}\r\n".encode()
         )
+    mime_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
     parts.append(
         f'--{boundary}\r\nContent-Disposition: form-data; name="{field_name}";'
-        f' filename="{filename}"\r\nContent-Type: application/octet-stream\r\n\r\n'.encode()
+        f' filename="{filename}"\r\nContent-Type: {mime_type}\r\n\r\n'.encode()
     )
     parts.append(content)
     parts.append(f"\r\n--{boundary}--\r\n".encode())
