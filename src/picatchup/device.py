@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 from picatchup import audio, hardware, latest
 from picatchup.config import Settings
 from picatchup.display import Display, create_display
-from picatchup.pisugar import PiSugarButton
+from picatchup.pisugar import PiSugarBattery, PiSugarButton
 from picatchup.errors import RaspberryPiError
 from picatchup.status import DeviceStatus, Status, StatusFile
 
@@ -34,6 +34,7 @@ log = logging.getLogger(__name__)
 SUCCESS_VISIBLE_SECONDS = 4.0
 ERROR_VISIBLE_SECONDS = 10.0
 EXTERNAL_STATUS_INTERVAL = 1.0
+BATTERY_UPDATE_INTERVAL = 30.0
 
 Recorder = Callable[..., Path]
 
@@ -104,6 +105,8 @@ class DeviceController:
         self._recording_stop: Event | None = None
         self._recording_started: float | None = None
         self._processing = False
+        self._battery = PiSugarBattery()
+        self._battery_percent: int | None = None
         self._snapshot = DeviceStatus(Status.BOOTING)
         self._last_seen_snapshot = self._snapshot
         self._closed = False
@@ -129,6 +132,10 @@ class DeviceController:
             self._dispatcher = dispatcher
         self.update(Status.BOOTING)
         dispatcher.start()
+        percent = self._battery.read_percent()
+        if percent is not None:
+            self._battery_percent = percent
+
         self.update(Status.READY, detail=self._ready_detail)
 
     def press(self) -> None:
@@ -161,6 +168,9 @@ class DeviceController:
     ) -> DeviceStatus:
         """Publish one coherent update to the file, OLED and LED."""
         with self._update_lock:
+            if battery_percent is None:
+                battery_percent = self._battery_percent
+
             snapshot = DeviceStatus(
                 status,
                 detail=detail,
@@ -218,10 +228,11 @@ class DeviceController:
         next_elapsed: float | None = None
         return_ready_at: float | None = None
         next_external = self._monotonic() + EXTERNAL_STATUS_INTERVAL
+        next_battery = self._monotonic() + BATTERY_UPDATE_INTERVAL
         try:
             while True:
                 now = self._monotonic()
-                deadlines = [next_external]
+                deadlines = [next_external, next_battery]
                 deadlines.extend(
                     deadline for deadline in (next_elapsed, return_ready_at) if deadline is not None
                 )
@@ -240,6 +251,23 @@ class DeviceController:
                             return_ready_at = now + SUCCESS_VISIBLE_SECONDS
                         elif external is Status.ERROR:
                             return_ready_at = now + ERROR_VISIBLE_SECONDS
+                    if now >= next_battery:
+                        percent = self._battery.read_percent()
+                        next_battery = now + BATTERY_UPDATE_INTERVAL
+
+                        if percent is not None:
+                            self._battery_percent = percent
+
+                            with self._lock:
+                                current = self._snapshot
+
+                            self.update(
+                                current.status,
+                                detail=current.detail,
+                                elapsed_seconds=current.elapsed_seconds,
+                                battery_percent=percent,
+                            )
+
                     if return_ready_at is not None and now >= return_ready_at:
                         self.update(Status.READY, detail=self._ready_detail)
                         return_ready_at = None
@@ -413,6 +441,8 @@ class DeviceController:
         finally:
             with self._lock:
                 self._processing = False
+                self._battery = PiSugarBattery()
+                self._battery_percent: int | None = None
 
     def _sync_external_status(self) -> Status | None:
         """Render a status written by daily/backup without republishing it."""

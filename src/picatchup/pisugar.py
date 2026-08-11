@@ -90,3 +90,37 @@ class PiSugarButton:
 
         finally:
             bus.close()
+
+
+class PiSugarBattery:
+    def __init__(
+        self,
+        *,
+        bus_number: int = 1,
+        address: int = 0x57,
+    ) -> None:
+        self._bus_number = bus_number
+        self._address = address
+
+    def read_percent(self) -> int | None:
+        try:
+            import smbus
+        except ImportError:
+            log.warning("python3-smbus non installato")
+            return None
+
+        try:
+            bus = smbus.SMBus(self._bus_number)
+            try:
+                value = bus.read_byte_data(self._address, 0x2A)
+            finally:
+                bus.close()
+        except OSError as error:
+            log.debug("PiSugar battery read failed: %s", error)
+            return None
+
+        if 0 <= value <= 100:
+            return value
+
+        log.warning("PiSugar battery returned invalid percentage: %s", value)
+        return None
