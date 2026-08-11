@@ -8,7 +8,9 @@ dynamic = ["version"]
 description = "Catch up on the lessons you missed"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "reportlab>=4.0",
+]
 
 [project.optional-dependencies]
 dev = ["mypy>=1.11", "pytest>=8.0", "ruff>=0.6"]
