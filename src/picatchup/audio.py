@@ -276,7 +276,7 @@ def to_mp3(source: Path, destination: Path, *, bitrate: str = "48k") -> Path:
                 "-ac",
                 CHANNELS,
                 "-ar",
-                SAMPLE_RATE,
+                OUTPUT_SAMPLE_RATE,
                 "-c:a",
                 "libmp3lame",
                 "-b:a",
