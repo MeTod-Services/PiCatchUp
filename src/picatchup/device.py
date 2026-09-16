@@ -107,6 +107,7 @@ class DeviceController:
         self._processing = False
         self._battery = PiSugarBattery()
         self._battery_percent: int | None = None
+        self._external_power: bool | None = None
         self._snapshot = DeviceStatus(Status.BOOTING)
         self._last_seen_snapshot = self._snapshot
         self._closed = False
@@ -132,9 +133,11 @@ class DeviceController:
             self._dispatcher = dispatcher
         self.update(Status.BOOTING)
         dispatcher.start()
-        percent = self._battery.read_percent()
+        percent, external_power = self._battery.read_status()
         if percent is not None:
             self._battery_percent = percent
+        if external_power is not None:
+            self._external_power = external_power
 
         self.update(Status.READY, detail=self._ready_detail)
 
@@ -165,17 +168,21 @@ class DeviceController:
         detail: str | None = None,
         elapsed_seconds: int | None = None,
         battery_percent: int | None = None,
+        external_power: bool | None = None,
     ) -> DeviceStatus:
         """Publish one coherent update to the file, OLED and LED."""
         with self._update_lock:
             if battery_percent is None:
                 battery_percent = self._battery_percent
+            if external_power is None:
+                external_power = self._external_power
 
             snapshot = DeviceStatus(
                 status,
                 detail=detail,
                 elapsed_seconds=elapsed_seconds,
                 battery_percent=battery_percent,
+                external_power=external_power,
             )
             with self._lock:
                 previous_status = self._snapshot.status
@@ -252,11 +259,13 @@ class DeviceController:
                         elif external is Status.ERROR:
                             return_ready_at = now + ERROR_VISIBLE_SECONDS
                     if now >= next_battery:
-                        percent = self._battery.read_percent()
+                        percent, external_power = self._battery.read_status()
                         next_battery = now + BATTERY_UPDATE_INTERVAL
 
                         if percent is not None:
                             self._battery_percent = percent
+                        if external_power is not None:
+                            self._external_power = external_power
 
                             with self._lock:
                                 current = self._snapshot
@@ -265,7 +274,8 @@ class DeviceController:
                                 current.status,
                                 detail=current.detail,
                                 elapsed_seconds=current.elapsed_seconds,
-                                battery_percent=percent,
+                                battery_percent=self._battery_percent,
+                                external_power=self._external_power,
                             )
 
                     if return_ready_at is not None and now >= return_ready_at:
@@ -441,8 +451,6 @@ class DeviceController:
         finally:
             with self._lock:
                 self._processing = False
-                self._battery = PiSugarBattery()
-                self._battery_percent: int | None = None
 
     def _sync_external_status(self) -> Status | None:
         """Render a status written by daily/backup without republishing it."""

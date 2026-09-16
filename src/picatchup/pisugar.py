@@ -102,6 +102,35 @@ class PiSugarBattery:
         self._bus_number = bus_number
         self._address = address
 
+    def read_status(self) -> tuple[int | None, bool | None]:
+        """Return battery percentage and external-power state."""
+        try:
+            import smbus
+        except ImportError:
+            log.warning("python3-smbus non installato")
+            return None, None
+
+        try:
+            bus = smbus.SMBus(self._bus_number)
+            try:
+                percent = bus.read_byte_data(self._address, 0x2A)
+                control = bus.read_byte_data(self._address, 0x02)
+            finally:
+                bus.close()
+        except OSError as error:
+            log.debug("PiSugar status read failed: %s", error)
+            return None, None
+
+        if not 0 <= percent <= 100:
+            log.warning(
+                "PiSugar battery returned invalid percentage: %s",
+                percent,
+            )
+            percent = None
+
+        external_power = bool(control & 0x80)
+        return percent, external_power
+
     def read_percent(self) -> int | None:
         try:
             import smbus

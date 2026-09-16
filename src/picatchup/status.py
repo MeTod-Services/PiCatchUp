@@ -44,6 +44,7 @@ class DeviceStatus:
     detail: str | None = None
     elapsed_seconds: int | None = None
     battery_percent: int | None = None
+    external_power: bool | None = None
     updated_at: str = field(default_factory=_timestamp)
 
     def to_dict(self) -> dict[str, object]:
@@ -57,6 +58,8 @@ class DeviceStatus:
             value["elapsed_seconds"] = max(0, self.elapsed_seconds)
         if self.battery_percent is not None:
             value["battery_percent"] = min(100, max(0, self.battery_percent))
+        if self.external_power is not None:
+            value["external_power"] = self.external_power
         return value
 
     @classmethod
@@ -69,6 +72,7 @@ class DeviceStatus:
         detail = value.get("detail")
         elapsed = value.get("elapsed_seconds")
         battery = value.get("battery_percent")
+        external_power = value.get("external_power")
         updated = value.get("updated_at")
         if detail is not None and not isinstance(detail, str):
             raise ValueError("status detail must be text")
@@ -76,6 +80,8 @@ class DeviceStatus:
             raise ValueError("elapsed_seconds must be a whole number")
         if battery is not None and (not isinstance(battery, int) or isinstance(battery, bool)):
             raise ValueError("battery_percent must be a whole number")
+        if external_power is not None and not isinstance(external_power, bool):
+            raise ValueError("external_power must be true or false")
         if updated is not None and not isinstance(updated, str):
             raise ValueError("updated_at must be text")
         return cls(
@@ -83,6 +89,7 @@ class DeviceStatus:
             detail=detail,
             elapsed_seconds=elapsed,
             battery_percent=battery,
+            external_power=external_power,
             updated_at=updated or _timestamp(),
         )
 

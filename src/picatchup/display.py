@@ -142,10 +142,38 @@ class SSD1306Display:
             self._draw.rectangle((0, 0, self.width, self.height), outline=0, fill=0)
             max_characters = max(1, self.width // 6)
             lines = tuple(line[:max_characters] for line in frame.lines)
-            positions = (0, 16, 32, max(48, self.height - 12))
+            positions = (0, 15, 30, 45)
             for text, y in zip(lines, positions, strict=True):
                 self._draw.text((0, y), text, font=self._font, fill=255)
-            self._driver.display(self._image)
+            # Draw a tiny pixel charging bolt next to the battery text.
+            # This avoids depending on Unicode glyph support on the OLED font.
+            if snapshot.external_power:
+                battery_y = positions[2]
+                battery_text = lines[2]
+                try:
+                    bbox = self._draw.textbbox(
+                        (0, battery_y),
+                        battery_text,
+                        font=self._font,
+                    )
+                    bolt_x = min(self.width - 8, bbox[2] + 3)
+                except AttributeError:
+                    bolt_x = 72
+
+                y = battery_y + 1
+                self._draw.polygon(
+                    (
+                        (bolt_x + 4, y),
+                        (bolt_x + 1, y + 6),
+                        (bolt_x + 4, y + 6),
+                        (bolt_x + 2, y + 11),
+                        (bolt_x + 7, y + 4),
+                        (bolt_x + 4, y + 4),
+                    ),
+                    fill=255,
+                )
+
+            self._driver.display(self._image.rotate(180))
             self._failed_at = None
         except Exception as error:
             self._failed_at = time.monotonic()
