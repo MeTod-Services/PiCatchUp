@@ -40,14 +40,15 @@ def frame_for(snapshot: DeviceStatus) -> DisplayFrame:
         else "Batt: --"
     )
     detail = snapshot.detail or ""
+    label = "Conversazione" if snapshot.mode == "conversation" else "Lezione"
     if snapshot.status is Status.BOOTING:
         return DisplayFrame("PiCatchUp", "", "Avvio...")
     if snapshot.status is Status.READY:
         return DisplayFrame(
-            "PiCatchUp PRONTO",
+            label.upper(),
             detail or "Mic: --  WiFi: --",
             battery,
-            "Premi pulsante",
+            "1 REC / 3 Modo",
         )
     if snapshot.status is Status.RECORDING:
         elapsed = max(0, snapshot.elapsed_seconds or 0)
@@ -56,18 +57,18 @@ def frame_for(snapshot: DeviceStatus) -> DisplayFrame:
         indicator = "● REC" if elapsed % 2 == 0 else "  REC"
         return DisplayFrame(
             indicator,
-            detail or "Lezione",
+            detail or label,
             f"{hours:02d}:{minutes:02d}:{seconds:02d}",
             "Premi per stop",
         )
     if snapshot.status is Status.SAVING:
-        return DisplayFrame("Salvataggio", "registrazione...")
+        return DisplayFrame("Salvataggio", label)
     if snapshot.status is Status.TRANSCRIBING:
         return DisplayFrame("Elaborazione", "Trascrizione...", detail)
     if snapshot.status is Status.SUMMARIZING:
-        return DisplayFrame("Elaborazione", "Creo riassunto...")
+        return DisplayFrame(label, "Creo riassunto...")
     if snapshot.status is Status.SENDING:
-        return DisplayFrame("Elaborazione", "Invio Telegram...")
+        return DisplayFrame(label, "Invio Telegram...")
     if snapshot.status is Status.SUCCESS:
         return DisplayFrame(
             "FATTO",

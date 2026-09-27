@@ -41,8 +41,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        settings = load_settings()
-        setup_logging(settings.log_level, settings.secrets)
+        base_settings = load_settings()
+        settings = base_settings.for_mode(args.mode)
+        setup_logging(settings.log_level, base_settings.secrets)
         handler = HANDLERS[args.command]
         return handler(settings, args)
     except PiCatchUpError as error:
@@ -56,6 +57,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="picatchup", description="Catch up on missed lessons")
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--mode",
+        choices=("lesson", "conversation"),
+        default="lesson",
+        help="select separate data, bot and allowlist (default: lesson)",
+    )
     commands = parser.add_subparsers(dest="command", required=True)
 
     commands.add_parser("init", help="create the data folders and the database")

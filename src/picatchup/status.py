@@ -45,11 +45,13 @@ class DeviceStatus:
     elapsed_seconds: int | None = None
     battery_percent: int | None = None
     external_power: bool | None = None
+    mode: str = "lesson"
     updated_at: str = field(default_factory=_timestamp)
 
     def to_dict(self) -> dict[str, object]:
         value: dict[str, object] = {
             "status": self.status.value,
+            "mode": self.mode,
             "updated_at": self.updated_at,
         }
         if self.detail is not None:
@@ -69,6 +71,9 @@ class DeviceStatus:
         raw_status = value.get("status")
         if not isinstance(raw_status, str):
             raise ValueError("status JSON has no status")
+        mode = value.get("mode", "lesson")
+        if not isinstance(mode, str) or mode not in {"lesson", "conversation"}:
+            raise ValueError("invalid device mode")
         detail = value.get("detail")
         elapsed = value.get("elapsed_seconds")
         battery = value.get("battery_percent")
@@ -86,6 +91,7 @@ class DeviceStatus:
             raise ValueError("updated_at must be text")
         return cls(
             status=Status(raw_status),
+            mode=mode,
             detail=detail,
             elapsed_seconds=elapsed,
             battery_percent=battery,

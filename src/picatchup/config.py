@@ -7,7 +7,7 @@ or a test set a value without editing any file.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -51,10 +51,37 @@ class Settings:
     timezone: str
     log_level: str
 
+    conversation_bot_token: str = ""
+    mode: str = "lesson"
+
+    def for_mode(self, mode: str) -> Settings:
+        """Select an isolated store and bot; never fall back to lesson credentials."""
+        if mode == self.mode:
+            return self
+        if mode != "conversation" or self.mode != "lesson":
+            raise ConfigError("select modes from the base lesson settings")
+        root = self.data_dir / "conversation"
+        return replace(
+            self,
+            mode=mode,
+            data_dir=root,
+            db_path=root / "picatchup.db",
+            inbox_dir=root / "inbox",
+            audio_dir=root / "audio",
+            backup_dir=root / "backups",
+            status_file=root / "device-status.json",
+            telegram_bot_token=self.conversation_bot_token,
+            backup_remote="",
+        )
+
     @property
     def secrets(self) -> list[str]:
         """The values the logger must never print. See log.setup_logging."""
-        return [s for s in (self.groq_api_key, self.telegram_bot_token) if s]
+        return [
+            s
+            for s in (self.groq_api_key, self.telegram_bot_token, self.conversation_bot_token)
+            if s
+        ]
 
 
 def require(value: str, name: str) -> str:
@@ -71,6 +98,7 @@ def load_settings(env_file: str | Path = ".env") -> Settings:
     data_dir = Path(values.get("DATA_DIR", "data")).expanduser().resolve()
 
     settings = Settings(
+        conversation_bot_token=values.get("CONVERSATION_TELEGRAM_BOT_TOKEN", "").strip(),
         groq_api_key=values.get("GROQ_API_KEY", "").strip(),
         telegram_bot_token=values.get("TELEGRAM_BOT_TOKEN", "").strip(),
         transcription_model=values.get("TRANSCRIPTION_MODEL", "whisper-large-v3-turbo").strip(),
@@ -105,6 +133,11 @@ def load_settings(env_file: str | Path = ".env") -> Settings:
 
 
 def _validate(settings: Settings) -> None:
+    if (
+        settings.conversation_bot_token
+        and settings.conversation_bot_token == settings.telegram_bot_token
+    ):
+        raise ConfigError("CONVERSATION_TELEGRAM_BOT_TOKEN must belong to a separate bot.")
     pins = (settings.gpio_button_pin, settings.gpio_led_pin)
     if any(pin > 27 for pin in pins):
         raise ConfigError("GPIO_BUTTON_PIN and GPIO_LED_PIN must be BCM pins from 1 to 27.")

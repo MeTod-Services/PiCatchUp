@@ -75,13 +75,15 @@ run_cli() {
     "cd '$DATA_DIR'; '$APP_DIR/venv/bin/picatchup' $*"
 }
 run_cli init
+run_cli --mode conversation init
 
 if ! run_cli doctor; then
   echo "Doctor reported items to fix. This is expected until secrets and hardware are connected." >&2
 fi
 
 # Upgrade already-running services without enabling anything the operator left disabled.
-systemctl try-restart picatchup-device.service picatchup-bot.service || true
+systemctl try-restart picatchup-device.service picatchup-bot.service \
+  picatchup-conversation-bot.service || true
 
 if $ENABLE_SERVICES; then
   systemctl enable --now picatchup-device.service picatchup-bot.service \

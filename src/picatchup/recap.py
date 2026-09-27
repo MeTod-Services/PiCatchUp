@@ -76,7 +76,7 @@ def make_recap(
 
     model = require(settings.text_model, "TEXT_MODEL")
     writer = writer or _groq(settings, model)
-    prompt = build_prompt(load_template(), recap_date, lessons)
+    prompt = build_prompt(template_for(settings), recap_date, lessons)
 
     log.info("writing the recap for %s from %d lesson(s)", recap_date, len(lessons))
     text = writer(prompt).strip()
@@ -130,3 +130,10 @@ def _describe(lesson: sqlite3.Row) -> str:
     if minutes:
         heading = f"{heading} ({minutes} minuti)"
     return f"### {heading}\n{lesson['text']}"
+
+
+def template_for(settings: Settings) -> str:
+    path = PROMPT_PATH
+    if settings.mode == "conversation":
+        path = path.with_name("conversation.md")
+    return load_template(path)

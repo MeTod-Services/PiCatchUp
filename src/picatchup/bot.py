@@ -157,15 +157,15 @@ def handle_update(
 
     command = _command(text)
     if command == "/start":
-        sender(START_TEXT, update.chat_id)
+        sender(_mode_text(START_TEXT, settings), update.chat_id)
     elif command in {"/aiuto", "/help"}:
-        sender(HELP_TEXT, update.chat_id)
+        sender(_mode_text(HELP_TEXT, settings), update.chat_id)
     elif command == "/privacy":
-        sender(PRIVACY_TEXT, update.chat_id)
+        sender(_mode_text(PRIVACY_TEXT, settings), update.chat_id)
     elif command == "/riassunto":
         sender(_latest_recap(conn), update.chat_id)
     elif command is not None:
-        sender(HELP_TEXT, update.chat_id)
+        sender(_mode_text(HELP_TEXT, settings), update.chat_id)
     else:
         try:
             answer = answerer(conn, settings, text)
@@ -237,3 +237,13 @@ def _telegram_leaver(token: str) -> Leaver:
 
 def _default_answerer(conn: sqlite3.Connection, settings: Settings, text: str) -> str:
     return qa.answer_question(conn, settings, text).text
+
+
+def _mode_text(text: str, settings: Settings) -> str:
+    if settings.mode == "conversation":
+        return (
+            text.replace("PiCatchUp", "PiCatchUp Conversazioni")
+            .replace("lezioni", "conversazioni")
+            .replace("lezione", "conversazione")
+        )
+    return text

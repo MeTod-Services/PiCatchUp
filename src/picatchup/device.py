@@ -13,7 +13,8 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextlib import closing
+from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum, auto
 from pathlib import Path
@@ -22,11 +23,11 @@ from types import FrameType
 from typing import Protocol
 from zoneinfo import ZoneInfo
 
-from picatchup import audio, hardware, latest
-from picatchup.config import Settings
+from picatchup import audio, db, hardware, latest, users
+from picatchup.config import Settings, require
 from picatchup.display import Display, create_display
-from picatchup.pisugar import PiSugarBattery, PiSugarButton
 from picatchup.errors import RaspberryPiError
+from picatchup.pisugar import PiSugarBattery, PiSugarButton
 from picatchup.status import DeviceStatus, Status, StatusFile
 
 log = logging.getLogger(__name__)
@@ -51,6 +52,7 @@ class StatusPublisher(Protocol):
 
 class _EventKind(Enum):
     PRESS = auto()
+    SWITCH_MODE = auto()
     RECORDING_DONE = auto()
     SHUTDOWN = auto()
 
@@ -83,6 +85,7 @@ class DeviceController:
         elapsed_interval: float = 1.0,
     ) -> None:
         self.settings = settings
+        self._active_settings = settings
         self._recorder = recorder
         self._led = led or hardware.create_led(settings)
         self._display = display or create_display(settings)
@@ -145,9 +148,33 @@ class DeviceController:
         """GPIO-safe callback: enqueue and return without touching hardware."""
         with self._lock:
             running = self._dispatcher is not None and not self._closed
-            processing = self._processing
+            processing = self._processing or self._snapshot.status is Status.SAVING
         if running and not processing:
             self._events.put_nowait(_DeviceEvent(_EventKind.PRESS))
+
+    def switch_mode(self) -> None:
+        """Accept a gesture only while idle; never defer it until after processing."""
+        with self._lock:
+            idle = (
+                self._dispatcher is not None
+                and not self._closed
+                and not self._processing
+                and self._recording_stop is None
+                and self._snapshot.status in {Status.READY, Status.SUCCESS, Status.ERROR}
+            )
+        if idle:
+            self._events.put_nowait(_DeviceEvent(_EventKind.SWITCH_MODE))
+
+    def _switch_mode(self) -> None:
+        if (
+            self.is_recording
+            or self._processing
+            or self.snapshot.status not in {Status.READY, Status.SUCCESS, Status.ERROR}
+        ):
+            return
+        mode = "conversation" if self._active_settings.mode == "lesson" else "lesson"
+        self._active_settings = self.settings.for_mode(mode)
+        self.update(Status.READY, detail=self._ready_detail)
 
     def request_shutdown(self) -> None:
         """Signal-safe in practice: wake the dispatcher and do no waiting."""
@@ -183,6 +210,7 @@ class DeviceController:
                 elapsed_seconds=elapsed_seconds,
                 battery_percent=battery_percent,
                 external_power=external_power,
+                mode=self._active_settings.mode,
             )
             with self._lock:
                 previous_status = self._snapshot.status
@@ -283,7 +311,12 @@ class DeviceController:
                         return_ready_at = None
                     continue
 
-                if event.kind is _EventKind.PRESS and not shutting_down:
+                if event.kind is _EventKind.SWITCH_MODE and not shutting_down:
+                    self._switch_mode()
+                    return_ready_at = None
+                elif event.kind is _EventKind.PRESS and not shutting_down:
+                    if self._processing or self.snapshot.status is Status.SAVING:
+                        continue
                     return_ready_at = None
                     if self.is_recording:
                         self._request_recording_stop()
@@ -317,6 +350,18 @@ class DeviceController:
             self._stopped.set()
 
     def _start_recording(self) -> bool:
+        if self._active_settings.mode == "conversation":
+            try:
+                require(self._active_settings.telegram_bot_token, "CONVERSATION_TELEGRAM_BOT_TOKEN")
+                with closing(db.connect(self._active_settings.db_path)) as conn:
+                    db.create_tables(conn)
+                    if not users.recipients(conn):
+                        self.update(Status.ERROR, detail="Whitelist vuota")
+                        return False
+            except Exception as error:
+                log.warning("conversation configuration unavailable: %s", error)
+                self.update(Status.ERROR, detail="Configura bot conv.")
+                return False
         try:
             audio.check_input_device(
                 self.settings.audio_input_format, self.settings.audio_input_device
@@ -404,12 +449,17 @@ class DeviceController:
                     sys.executable,
                     "-m",
                     "picatchup",
+                    "--mode",
+                    self._active_settings.mode,
                     "transcribe",
                     str(result.destination),
                     "--subject",
-                    "generale",
+                    (
+                        "Conversazione"
+                        if self._active_settings.mode == "conversation"
+                        else "generale"
+                    ),
                 ],
-                cwd=str(Path(__file__).resolve().parents[2]),
                 capture_output=True,
                 text=True,
                 timeout=1800,
@@ -426,10 +476,10 @@ class DeviceController:
 
             # Riassume SOLO la registrazione appena conclusa e invia
             # quel riassunto su Telegram.
-            self.update(Status.SUMMARIZING, detail="Riassumo lezione...")
+            self.update(Status.SUMMARIZING)
 
             latest.summarize_and_send(
-                self.settings,
+                self._active_settings,
                 result.destination,
             )
 
@@ -455,7 +505,7 @@ class DeviceController:
     def _sync_external_status(self) -> Status | None:
         """Render a status written by daily/backup without republishing it."""
         external = self._reader()
-        if external is None:
+        if external is None or external.mode != self._active_settings.mode:
             return None
         with self._lock:
             if external == self._last_seen_snapshot:
@@ -465,7 +515,7 @@ class DeviceController:
                 return None
             rendered = external
             if external.status is Status.READY and not external.detail:
-                rendered = DeviceStatus(Status.READY, detail=self._ready_detail)
+                rendered = replace(external, detail=self._ready_detail)
             self._snapshot = rendered
         try:
             self._display.render(rendered)
@@ -476,10 +526,10 @@ class DeviceController:
     def _destination(self) -> Path:
         now = datetime.now(ZoneInfo(self.settings.timezone))
         stem = f"{now:%Y-%m-%d-%H%M%S}"
-        destination = self.settings.inbox_dir / f"{stem}.mp3"
+        destination = self._active_settings.inbox_dir / f"{stem}.mp3"
         number = 2
         while destination.exists():
-            destination = self.settings.inbox_dir / f"{stem}-{number}.mp3"
+            destination = self._active_settings.inbox_dir / f"{stem}-{number}.mp3"
             number += 1
         return destination
 
@@ -488,9 +538,7 @@ def _ready_detail(settings: Settings) -> str:
     microphone = "--"
     try:
         if settings.audio_input_format == "alsa":
-            audio.check_input_device(
-                settings.audio_input_format, settings.audio_input_device
-            )
+            audio.check_input_device(settings.audio_input_format, settings.audio_input_device)
             microphone = "OK"
     except Exception:
         pass
@@ -512,6 +560,8 @@ def _ready_detail(settings: Settings) -> str:
 
 def listen(settings: Settings) -> None:
     """Run the standalone device until SIGINT or SIGTERM."""
+    if settings.mode != "lesson":
+        raise RaspberryPiError("start device without --mode; use the button to switch")
     controller = DeviceController(settings)
     button: PiSugarButton | None = None
     previous_int = signal.getsignal(signal.SIGINT)
@@ -522,7 +572,7 @@ def listen(settings: Settings) -> None:
 
     controller.start()
     try:
-        button = PiSugarButton(controller.press)
+        button = PiSugarButton(controller.press, switch_mode=controller.switch_mode)
         button.start()
         log.info("PiSugar power button listener ready")
     except Exception as error:

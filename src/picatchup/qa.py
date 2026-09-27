@@ -47,9 +47,22 @@ def answer_question(
     if not hits or not search.has_meaningful_evidence(question, hits):
         # Do this before constructing the real provider: a miss costs no API
         # call and does not even require Groq credentials.
-        return Answer(text=NO_EVIDENCE, hits=())
+        return Answer(
+            text=(
+                NO_EVIDENCE.replace("lezioni", "conversazioni")
+                if settings.mode == "conversation"
+                else NO_EVIDENCE
+            ),
+            hits=(),
+        )
 
-    prompt = build_prompt(load_template(), question, hits)
+    template = load_template()
+    if settings.mode == "conversation":
+        template = template.replace("di uno studente", "su una conversazione")
+        template = template.replace("lezione", "conversazione").replace("classe", "partecipanti")
+        # Keep the provider's section protocol stable; relabel the final reply below.
+        template = template.replace("📖 Dalla conversazione", LESSON_HEADING)
+    prompt = build_prompt(template, question, hits)
     write = writer if writer is not None else _groq(settings)
     lesson_text, extra_text = _split_sections(write(prompt))
     text = (
@@ -57,6 +70,9 @@ def answer_question(
         f"🔎 Fonti: {_citations(hits)}\n\n"
         f"{EXTRA_HEADING}\n{extra_text}"
     )
+    if settings.mode == "conversation":
+        text = text.replace(LESSON_HEADING, "📖 Dalla conversazione")
+        text = text.replace("basata sulla lezione", "basata sulla conversazione")
     return Answer(text=text, hits=hits)
 
 

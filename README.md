@@ -337,3 +337,10 @@ GitHub Actions runs the same checks on supported generic Linux Python versions.
 Provider tests use a fake HTTP server on localhost; GPIO, LED and OLED tests use
 in-memory backends. Complete physical acceptance remains
 `docs/RPI_CHECKLIST.md`.
+
+## Modalità conversazione
+
+Il servizio PiSugar supporta il **triplo clic a dispositivo inattivo** per
+alternare LEZIONE e CONVERSAZIONE, con interfaccia OLED e bot Telegram distinti.
+La seconda whitelist parte vuota. Configurazione e uso:
+[modalità conversazione](docs/CONVERSATION_MODE.md).

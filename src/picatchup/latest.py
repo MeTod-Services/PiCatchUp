@@ -7,10 +7,11 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from picatchup import audio, pdf_report, recap, users
+from picatchup import audio, db, pdf_report, recap, users
 from picatchup.config import Settings, require
 from picatchup.errors import PiCatchUpError
 from picatchup.providers import groq_text, telegram
+from picatchup.util import new_id, utc_now
 
 log = logging.getLogger(__name__)
 
@@ -118,8 +119,7 @@ def summarize_and_send(settings: Settings, recording: Path) -> str:
 
     audio_hash = audio.sha256_of(recording)
 
-    conn = sqlite3.connect(settings.db_path)
-    conn.row_factory = sqlite3.Row
+    conn = db.connect(settings.db_path)
 
     try:
         lesson = conn.execute(
@@ -141,16 +141,14 @@ def summarize_and_send(settings: Settings, recording: Path) -> str:
         ).fetchone()
 
         if lesson is None:
-            raise PiCatchUpError(
-                f"transcribed lesson not found for {recording.name}"
-            )
+            raise PiCatchUpError(f"transcribed lesson not found for {recording.name}")
 
         model = require(settings.text_model, "TEXT_MODEL")
         api_key = require(settings.groq_api_key, "GROQ_API_KEY")
 
         # Una sola lesson: mai il recap cumulativo della giornata.
         prompt = recap.build_prompt(
-            recap.load_template(),
+            recap.template_for(settings),
             lesson["lesson_date"],
             [lesson],
         )
@@ -162,9 +160,7 @@ def summarize_and_send(settings: Settings, recording: Path) -> str:
         ).strip()
 
         if not summary:
-            raise PiCatchUpError(
-                "the text provider returned an empty summary"
-            )
+            raise PiCatchUpError("the text provider returned an empty summary")
 
         token = require(
             settings.telegram_bot_token,
@@ -174,10 +170,22 @@ def summarize_and_send(settings: Settings, recording: Path) -> str:
         people = users.recipients(conn)
 
         if not people:
-            raise PiCatchUpError(
-                "there is nobody to send it to. "
-                "Add someone: picatchup user add"
-            )
+            raise PiCatchUpError("there is nobody to send it to. Add someone: picatchup user add")
+
+        if settings.mode == "conversation":
+            with conn:
+                conn.execute(
+                    "DELETE FROM deliveries WHERE recap_id IN "
+                    "(SELECT id FROM recaps WHERE recap_date = ?)",
+                    (lesson["lesson_date"],),
+                )
+                conn.execute(
+                    "INSERT INTO recaps (id, recap_date, text, model, created_at) "
+                    "VALUES (?, ?, ?, ?, ?) ON CONFLICT (recap_date) DO UPDATE SET "
+                    "text = excluded.text, model = excluded.model, "
+                    "created_at = excluded.created_at",
+                    (new_id(), lesson["lesson_date"], summary, model, utc_now()),
+                )
 
         # 1. Messaggio testuale.
         for person in people:
@@ -216,6 +224,11 @@ def summarize_and_send(settings: Settings, recording: Path) -> str:
             log.warning("PDF delivery failed: %s", error)
             return summary
 
+        # Conversation material remains in its isolated store. Never upload it
+        # to the lesson NAS destination or purge it through the lesson policy.
+        if settings.mode == "conversation":
+            return summary
+
         # 4. NAS. Se fallisce, NON cancellare niente.
         if not _send_pdf_to_nas(pdf_path):
             log.warning(
@@ -225,11 +238,7 @@ def summarize_and_send(settings: Settings, recording: Path) -> str:
             return summary
 
         # 5. Solo dopo rsync riuscito: cleanup totale locale.
-        stored_audio = (
-            Path(lesson["audio_path"])
-            if lesson["audio_path"]
-            else None
-        )
+        stored_audio = Path(lesson["audio_path"]) if lesson["audio_path"] else None
 
         _purge_lesson(
             conn,

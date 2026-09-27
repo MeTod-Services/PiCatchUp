@@ -1,0 +1,24 @@
+[Unit]
+Description=PiCatchUp conversation Telegram bot
+Wants=network-online.target
+After=network-online.target local-fs.target
+
+[Service]
+Type=simple
+User=picatchup
+Group=picatchup
+WorkingDirectory=/var/lib/picatchup
+EnvironmentFile=/etc/picatchup/picatchup.env
+ExecStart=/opt/picatchup/venv/bin/picatchup --mode conversation bot
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=35
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/picatchup
+
+[Install]
+WantedBy=multi-user.target

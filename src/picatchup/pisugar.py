@@ -8,16 +8,52 @@ from threading import Event, Thread
 log = logging.getLogger(__name__)
 
 
+class ClickSequence:
+    """Resolve short clicks after a quiet gap; long holds never select a mode."""
+
+    def __init__(
+        self,
+        single: Callable[[], None],
+        triple: Callable[[], None],
+        *,
+        gap_seconds: float = 0.45,
+    ) -> None:
+        self.single = single
+        self.triple = triple
+        self.gap_seconds = gap_seconds
+        self.count = 0
+        self.deadline: float | None = None
+
+    def release(self, now: float) -> None:
+        self.count += 1
+        self.deadline = now + self.gap_seconds
+
+    def flush(self, now: float) -> None:
+        if self.deadline is None or now < self.deadline:
+            return
+        count = self.count
+        self.count = 0
+        self.deadline = None
+        if count == 3:
+            self.triple()
+        else:
+            # Preserve the original meaning of single and double presses.
+            for _ in range(count):
+                self.single()
+
+
 class PiSugarButton:
     def __init__(
         self,
         callback: Callable[[], None],
         *,
+        switch_mode: Callable[[], None] | None = None,
         bus_number: int = 1,
         address: int = 0x57,
         max_click_seconds: float = 1.0,
     ) -> None:
         self._callback = callback
+        self._clicks = ClickSequence(callback, switch_mode) if switch_mode is not None else None
         self._bus_number = bus_number
         self._address = address
         self._max_click_seconds = max_click_seconds
@@ -74,7 +110,10 @@ class PiSugarButton:
                                 duration,
                             )
                             try:
-                                self._callback()
+                                if self._clicks is None:
+                                    self._callback()
+                                else:
+                                    self._clicks.release(now)
                             except Exception:
                                 log.exception("PiSugar button callback failed")
                         else:
@@ -85,6 +124,11 @@ class PiSugarButton:
 
                     pressed_at = None
 
+                if not pressed and self._clicks is not None:
+                    try:
+                        self._clicks.flush(now)
+                    except Exception:
+                        log.exception("PiSugar gesture callback failed")
                 previous = pressed
                 self._stop.wait(0.03)
 
